@@ -131,11 +131,33 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 // @Failure 500 {object} gin.H
 // @Router /tasks/{id} [put]
 func (h *TaskHandler) UpdateTask(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
-		return
-	}
+	taskID, err := uuid.Parse(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+        return
+    }
+    var updates struct {
+        Title       string    `json:"title" binding:"max=255"` // Ограничение длины
+        Description string    `json:"description" binding:"max=1000"`
+        Status      string    `json:"status" binding:"oneof=pending in_progress completed"`
+        DueDate     time.Time `json:"due_date"`
+    }
+    if err := c.ShouldBindJSON(&updates); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    task, err := h.Service.UpdateTask(c.Request.Context(), c.GetString("user_id"), &models.Task{
+        ID:          taskID,
+        Title:       updates.Title,
+        Description: updates.Description,
+        Status:      updates.Status,
+        DueDate:     updates.DueDate,
+    })
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, task)
 
 	var taskInput struct {
 		models.Task

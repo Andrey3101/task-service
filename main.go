@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
 	"tasks-service/config"
 	"tasks-service/handlers"
 	"tasks-service/middleware"
@@ -62,7 +63,7 @@ func main() {
 	defer rabbitCh.Close()
 
 	authService := services.NewAuthService(cfg)
-	taskService := services.NewTaskService(db, redisClient, rabbitCh)
+	taskService := services.NewTaskService(db, redisClient, rabbitCh, cfg)
 	taskHandler := handlers.NewTaskHandler(taskService, cfg)
 	queueService := queue.NewQueueService(cfg, taskService)
 
@@ -71,6 +72,7 @@ func main() {
 	r := gin.Default()
 	r.Use(middleware.AuthMiddleware(authService))
 
+	// WebSocket для обновлений задач
 	r.GET("/ws/tasks", func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
@@ -123,6 +125,22 @@ func main() {
 		}
 	})
 
+	// Эндпоинты Google Calendar
+	r.GET("/google/auth", func(c *gin.Context) {
+		url := taskService.GoogleCalendar.GetAuthURL()
+		c.JSON(http.StatusOK, gin.H{"url": url})
+	})
+
+	r.GET("/google/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		if err := taskService.GoogleCalendar.Authenticate(c.Request.Context(), code); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authenticate with Google"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Google Calendar authenticated"})
+	})
+
+	// Эндпоинты задач
 	api := r.Group("/tasks")
 	{
 		api.POST("/create", taskHandler.CreateTask)
@@ -140,6 +158,85 @@ func main() {
 		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
 	}
 
+	r.GET("/google/auth", func(c *gin.Context) {
+		url := taskService.GoogleCalendar.GetAuthURL()
+		c.JSON(http.StatusOK, gin.H{"url": url})
+	})
+
+	r.GET("/google/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		if err := taskService.GoogleCalendar.Authenticate(c.Request.Context(), code); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authenticate with Google"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Google Calendar authenticated"})
+	})
+
+	r.GET("/google/events", func(c *gin.Context) {
+		events, err := taskService.GoogleCalendar.GetCalendarEvents(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		eventList := make([]map[string]interface{}, 0, len(events))
+		for _, event := range events {
+			eventList = append(eventList, map[string]interface{}{
+				"id":          event.Id,
+				"summary":     event.Summary,
+				"description": event.Description,
+				"start":       event.Start.DateTime,
+				"end":         event.End.DateTime,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"events": eventList})
+	})
+
+	r.POST("/google/events", func(c *gin.Context) {
+		var input struct {
+			Summary     string `json:"summary" binding:"required,max=255"`
+			Description string `json:"description" binding:"max=1000"`
+			Start       string `json:"start" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		eventID, err := taskService.GoogleCalendar.CreateCalendarEvent(c.Request.Context(), input.Summary, input.Description, input.Start)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"event_id": eventID})
+	})
+
+	r.PUT("/google/events/:id", func(c *gin.Context) {
+		eventID := c.Param("id")
+		var input struct {
+			Summary     string `json:"summary" binding:"required,max=255"`
+			Description string `json:"description" binding:"max=1000"`
+			Start       string `json:"start" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		updatedEventID, err := taskService.GoogleCalendar.UpdateCalendarEvent(c.Request.Context(), eventID, input.Summary, input.Description, input.Start)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"event_id": updatedEventID})
+	})
+
+	r.DELETE("/google/events/:id", func(c *gin.Context) {
+		eventID := c.Param("id")
+		if err := taskService.GoogleCalendar.DeleteCalendarEvent(c.Request.Context(), eventID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
+	})
+	// Эндпоинты управления пользователями
 	api.GET("/users", func(c *gin.Context) {
 		userID := c.GetString("user_id")
 		role := c.GetString("role")
@@ -165,10 +262,15 @@ func main() {
 		}
 		targetID := c.Param("id")
 		var input struct {
-			PhoneNumber string `json:"phone_number"`
+			PhoneNumber string `json:"phone_number" binding:"max=20"`
 		}
-		if err := c.BindJSON(&input); err != nil {
+
+		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+			return
+		}
+		if input.PhoneNumber != "" && !regexp.MustCompile(`^\+?\d{7,20}$`).MatchString(input.PhoneNumber) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid phone number format"})
 			return
 		}
 		shard := taskService.determineUserShard(c.Request.Context(), userID)

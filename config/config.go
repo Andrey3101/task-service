@@ -11,6 +11,9 @@ type Config struct {
 	RedisAddr           string // Адрес Redis
 	JWTSecretOld        string // Старый ключ для переходного периода
 	Language            string // Язык интерфейса ("en" или "ru")
+	GoogleClientID      string `env:"GOOGLE_CLIENT_ID" default:"your-google-client-id"`
+	GoogleClientSecret  string `env:"GOOGLE_CLIENT_SECRET" default:"your-google-client-secret"`
+	GoogleRedirectURI   string `env:"GOOGLE_REDIRECT_URI" default:"http://localhost:8082/google/callback"`
 }
 
 func LoadConfig() Config {

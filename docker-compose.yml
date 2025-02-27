@@ -1,42 +1,52 @@
-version: "3.8"
+version: '3.8'
+
 services:
-  task-service-1:
-    build: .
-    ports:
-      - "8080:8080"
+  task-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
     environment:
-      - DB_CONN=postgres://user:password@db:5432/tasks_db
-      - REDIS_ADDR=redis:6379
-      - RABBITMQ=amqp://guest:guest@rabbitmq:5672/
-      - JWT_SECRET=your_secret_key
+      DBConn: postgres://user:password@postgres:5432/tasks?sslmode=disable
+      RedisAddr: redis:6379
+      RabbitMQ: amqp://guest:guest@rabbitmq:5672/
+      GOOGLE_CLIENT_ID: your-google-client-id
+      GOOGLE_CLIENT_SECRET: your-google-client-secret
+      GOOGLE_REDIRECT_URI: http://localhost:8082/google/callback
+      JWTSecret: your-secret-key
+      Port: 8082
+    ports:
+      - "8082:8082"
     depends_on:
-      - db
+      - postgres
       - redis
       - rabbitmq
-  task-service-2:
-    build: .
-    ports:
-      - "8081:8080"
-    environment:
-      - DB_CONN=postgres://user:password@db:5432/tasks_db
-      - REDIS_ADDR=redis:6379
-      - RABBITMQ=amqp://guest:guest@rabbitmq:5672/
-      - JWT_SECRET=your_secret_key
-    depends_on:
-      - db
-      - redis
-      - rabbitmq
-  db:
+    networks:
+      - app-network
+
+  postgres:
     image: postgres:15
     environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=tasks_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tasks
     volumes:
-      - task_db_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
   redis:
     image: redis:6
+    networks:
+      - app-network
+
   rabbitmq:
     image: rabbitmq:3-management
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
 volumes:
-  task_db_data:
+  postgres_data:

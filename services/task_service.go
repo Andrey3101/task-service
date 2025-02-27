@@ -6,22 +6,28 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"tasks-service/config"
 	"tasks-service/models"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/streadway/amqp"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/calendar/v3"
+	"google.golang.org/api/option"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 // TaskService управляет задачами с учетом шардирования и партиционирования
 type TaskService struct {
-	DB           *gorm.DB
-	Redis        *redis.Client
-	RabbitMQ     *amqp.Channel
-	AuthDBShards map[int]*gorm.DB
+	DB             *gorm.DB
+	Redis          *redis.Client
+	RabbitMQ       *amqp.Channel
+	AuthDBShards   map[int]*gorm.DB
+	GoogleCalendar *GoogleCalendarService
 }
 
 type TaskHistory struct {
@@ -58,8 +64,211 @@ type Suggestion struct {
 	Action map[string]interface{} `json:"action"`
 }
 
-// NewTaskService инициализирует сервис с шардированными подключениями
-func NewTaskService(db *gorm.DB, redis *redis.Client, rabbitMQ *amqp.Channel) *TaskService {
+// GoogleCalendarService для работы с Google Calendar API
+type GoogleCalendarService struct {
+	Config *oauth2.Config
+	Client *calendar.Service
+	Redis  *redis.Client
+}
+
+// NewGoogleCalendarService инициализирует сервис Google Calendar
+func NewGoogleCalendarService(cfg config.Config, redisClient *redis.Client) *GoogleCalendarService {
+	config := &oauth2.Config{
+		ClientID:     cfg.GoogleClientID,
+		ClientSecret: cfg.GoogleClientSecret,
+		RedirectURL:  cfg.GoogleRedirectURI,
+		Scopes:       []string{calendar.CalendarScope},
+		Endpoint:     google.Endpoint,
+	}
+	return &GoogleCalendarService{Config: config, Redis: redisClient}
+}
+
+func (s *GoogleCalendarService) GetAuthURL() string {
+	return s.Config.AuthCodeURL("state", oauth2.AccessTypeOffline)
+}
+
+func (s *GoogleCalendarService) Authenticate(ctx context.Context, code string) error {
+	token, err := s.Config.Exchange(ctx, code)
+	if err != nil {
+		return err
+	}
+	client, err := calendar.NewService(ctx, option.WithTokenSource(s.Config.TokenSource(ctx, token)))
+	if err != nil {
+		return err
+	}
+	s.Client = client
+	tokenJSON, _ := json.Marshal(token)
+	s.Redis.Set(ctx, "google_calendar_token", tokenJSON, 0)
+	return nil
+}
+
+func (s *GoogleCalendarService) LoadToken(ctx context.Context) error {
+	tokenJSON, err := s.Redis.Get(ctx, "google_calendar_token").Bytes()
+	if err != nil {
+		return err
+	}
+	var token oauth2.Token
+	if err := json.Unmarshal(tokenJSON, &token); err != nil {
+		return err
+	}
+	client, err := calendar.NewService(ctx, option.WithTokenSource(s.Config.TokenSource(ctx, &token)))
+	if err != nil {
+		return err
+	}
+	s.Client = client
+	return nil
+}
+
+func (s *GoogleCalendarService) CreateEvent(ctx context.Context, taskID, title, description string, dueDate time.Time) (string, error) {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return "", err
+		}
+	}
+	event := &calendar.Event{
+		Summary:     title,
+		Description: description,
+		Start: &calendar.EventDateTime{
+			DateTime: dueDate.Format(time.RFC3339),
+			TimeZone: "UTC",
+		},
+		End: &calendar.EventDateTime{
+			DateTime: dueDate.Add(time.Hour).Format(time.RFC3339),
+			TimeZone: "UTC",
+		},
+		Reminders: &calendar.EventReminders{
+			UseDefault: false,
+			Overrides:  []*calendar.EventReminder{{Method: "email", Minutes: 15}},
+		},
+	}
+	createdEvent, err := s.Client.Events.Insert("primary", event).Do()
+	if err != nil {
+		return "", err
+	}
+	s.Redis.Set(ctx, "calendar_event:"+taskID, createdEvent.Id, 0)
+	return createdEvent.Id, nil
+}
+
+func (s *GoogleCalendarService) UpdateEvent(ctx context.Context, taskID, eventID, title, description string, dueDate time.Time) error {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return err
+		}
+	}
+	event, err := s.Client.Events.Get("primary", eventID).Do()
+	if err != nil {
+		return err
+	}
+	event.Summary = title
+	event.Description = description
+	event.Start = &calendar.EventDateTime{DateTime: dueDate.Format(time.RFC3339), TimeZone: "UTC"}
+	event.End = &calendar.EventDateTime{DateTime: dueDate.Add(time.Hour).Format(time.RFC3339), TimeZone: "UTC"}
+	_, err = s.Client.Events.Update("primary", eventID, event).Do()
+	return err
+}
+
+func (s *GoogleCalendarService) DeleteEvent(ctx context.Context, taskID, eventID string) error {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return err
+		}
+	}
+	err := s.Client.Events.Delete("primary", eventID).Do()
+	if err == nil {
+		s.Redis.Del(ctx, "calendar_event:"+taskID)
+	}
+	return err
+}
+
+// GetCalendarEvents возвращает список событий из Google Calendar
+func (s *GoogleCalendarService) GetCalendarEvents(ctx context.Context) ([]*calendar.Event, error) {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return nil, fmt.Errorf("failed to load Google Calendar token: %v", err)
+		}
+	}
+	events, err := s.Client.Events.List("primary").TimeMin(time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339)).TimeMax(time.Now().Add(7 * 24 * time.Hour).Format(time.RFC3339)).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch events: %v", err)
+	}
+	return events.Items, nil
+}
+
+// CreateCalendarEvent создаёт новое событие в Google Calendar
+func (s *GoogleCalendarService) CreateCalendarEvent(ctx context.Context, summary, description, startTime string) (string, error) {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return "", fmt.Errorf("failed to load Google Calendar token: %v", err)
+		}
+	}
+	start, err := time.Parse(time.RFC3339, startTime)
+	if err != nil {
+		return "", fmt.Errorf("invalid start time format: %v", err)
+	}
+	event := &calendar.Event{
+		Summary:     summary,
+		Description: description,
+		Start: &calendar.EventDateTime{
+			DateTime: start.Format(time.RFC3339),
+			TimeZone: "UTC",
+		},
+		End: &calendar.EventDateTime{
+			DateTime: start.Add(time.Hour).Format(time.RFC3339), // +1 час по умолчанию
+			TimeZone: "UTC",
+		},
+		Reminders: &calendar.EventReminders{
+			UseDefault: false,
+			Overrides:  []*calendar.EventReminder{{Method: "email", Minutes: 15}},
+		},
+	}
+	createdEvent, err := s.Client.Events.Insert("primary", event).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to create event: %v", err)
+	}
+	return createdEvent.Id, nil
+}
+
+// UpdateCalendarEvent обновляет существующее событие в Google Calendar
+func (s *GoogleCalendarService) UpdateCalendarEvent(ctx context.Context, eventID, summary, description, startTime string) (string, error) {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return "", fmt.Errorf("failed to load Google Calendar token: %v", err)
+		}
+	}
+	start, err := time.Parse(time.RFC3339, startTime)
+	if err != nil {
+		return "", fmt.Errorf("invalid start time format: %v", err)
+	}
+	event, err := s.Client.Events.Get("primary", eventID).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get event: %v", err)
+	}
+	event.Summary = summary
+	event.Description = description
+	event.Start = &calendar.EventDateTime{DateTime: start.Format(time.RFC3339), TimeZone: "UTC"}
+	event.End = &calendar.EventDateTime{DateTime: start.Add(time.Hour).Format(time.RFC3339), TimeZone: "UTC"}
+	updatedEvent, err := s.Client.Events.Update("primary", eventID, event).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to update event: %v", err)
+	}
+	return updatedEvent.Id, nil
+}
+
+func (s *GoogleCalendarService) DeleteCalendarEvent(ctx context.Context, eventID string) error {
+	if s.Client == nil {
+		if err := s.LoadToken(ctx); err != nil {
+			return fmt.Errorf("failed to load Google Calendar token: %v", err)
+		}
+	}
+	err := s.Client.Events.Delete("primary", eventID).Do()
+	if err != nil {
+		return fmt.Errorf("failed to delete event: %v", err)
+	}
+	return nil
+}
+
+// NewTaskService инициализирует сервис с шардированными подключениями и Google Calendar
+func NewTaskService(db *gorm.DB, redis *redis.Client, rabbitMQ *amqp.Channel, cfg config.Config) *TaskService {
 	authDBShards := make(map[int]*gorm.DB)
 	for i := 0; i < 2; i++ {
 		dsn := fmt.Sprintf("postgres://user:password@localhost:5432/tasks?sslmode=disable&search_path=auth_shard_%d", i)
@@ -69,7 +278,13 @@ func NewTaskService(db *gorm.DB, redis *redis.Client, rabbitMQ *amqp.Channel) *T
 		}
 		authDBShards[i] = shardDB
 	}
-	return &TaskService{DB: db, Redis: redis, RabbitMQ: rabbitMQ, AuthDBShards: authDBShards}
+	return &TaskService{
+		DB:             db,
+		Redis:          redis,
+		RabbitMQ:       rabbitMQ,
+		AuthDBShards:   authDBShards,
+		GoogleCalendar: NewGoogleCalendarService(cfg, redis),
+	}
 }
 
 // getShard определяет шард по company_id
@@ -92,7 +307,7 @@ func fnv32a(str string) uint32 {
 	return hash
 }
 
-// CreateTask создает задачу с учетом шардирования и автоматического распределения
+// CreateTask создает задачу с учетом шардирования, автоматического распределения и Google Calendar
 func (s *TaskService) CreateTask(ctx context.Context, userID string, task *models.Task, autoAssign bool) (*models.Task, error) {
 	shard := s.determineUserShard(ctx, userID)
 	if shard == -1 {
@@ -127,6 +342,16 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 	s.logTaskChange(ctx, task.ID, "created", "", task.Title)
 	for _, assignee := range task.Assignees {
 		s.logTaskChange(ctx, task.ID, "assignee", "", assignee.UserID)
+	}
+
+	// Интеграция с Google Calendar
+	if s.GoogleCalendar.Client != nil {
+		eventID, err := s.GoogleCalendar.CreateEvent(ctx, task.ID.String(), task.Title, task.Description, task.DueDate)
+		if err != nil {
+			log.Printf("Failed to create Google Calendar event: %v", err)
+		} else {
+			log.Printf("Created Google Calendar event %s for task %s", eventID, task.ID)
+		}
 	}
 
 	s.invalidateCache(ctx, "tasks:*")
@@ -221,7 +446,7 @@ func (s *TaskService) GetTask(ctx context.Context, taskID uuid.UUID) *models.Tas
 	return &task
 }
 
-// UpdateTask обновляет задачу асинхронно через RabbitMQ
+// UpdateTask обновляет задачу асинхронно через RabbitMQ и Google Calendar
 func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *models.Task) (*models.Task, error) {
 	var existingTask models.Task
 	if err := s.DB.WithContext(ctx).First(&existingTask, "id = ?", task.ID).Error; err != nil {
@@ -244,6 +469,17 @@ func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *model
 	}); err != nil {
 		return nil, err
 	}
+
+	// Обновление события в Google Calendar
+	if s.GoogleCalendar.Client != nil {
+		if eventID, err := s.Redis.Get(ctx, "calendar_event:"+task.ID.String()).Result(); err == nil {
+			err = s.GoogleCalendar.UpdateEvent(ctx, task.ID.String(), eventID, task.Title, task.Description, task.DueDate)
+			if err != nil {
+				log.Printf("Failed to update Google Calendar event: %v", err)
+			}
+		}
+	}
+
 	s.invalidateCache(ctx, "tasks:*")
 	event := struct {
 		TaskID    string    `json:"task_id"`
@@ -255,7 +491,7 @@ func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *model
 	return task, nil
 }
 
-// DeleteTask удаляет задачу асинхронно через RabbitMQ
+// DeleteTask удаляет задачу асинхронно через RabbitMQ и Google Calendar
 func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID string) error {
 	var task models.Task
 	if err := s.DB.WithContext(ctx).First(&task, "id = ?", taskID).Error; err != nil {
@@ -274,6 +510,17 @@ func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID s
 	}); err != nil {
 		return err
 	}
+
+	// Удаление события из Google Calendar
+	if s.GoogleCalendar.Client != nil {
+		if eventID, err := s.Redis.Get(ctx, "calendar_event:"+taskID.String()).Result(); err == nil {
+			err = s.GoogleCalendar.DeleteEvent(ctx, taskID.String(), eventID)
+			if err != nil {
+				log.Printf("Failed to delete Google Calendar event: %v", err)
+			}
+		}
+	}
+
 	s.invalidateCache(ctx, "tasks:*")
 	event := struct {
 		TaskID    string    `json:"task_id"`

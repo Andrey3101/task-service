@@ -86,6 +86,9 @@ func (s *AuthService) GenerateToken(userID string, role string) (string, error) 
 }
 
 func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
+	if _, err := s.Redis.Get(context.Background(), "blacklist:"+tokenString).Result(); err == nil {
+		return nil, fmt.Errorf("token is blacklisted")
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(s.CurrentSecret), nil
 	})
