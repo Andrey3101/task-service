@@ -370,8 +370,8 @@ func (s *TaskService) GenerateReport(ctx context.Context, userID, period string)
 	}
 	var role string
 	s.AuthDBShards[shard].Raw("SELECT role FROM users WHERE user_id = ?", userID).Scan(&role)
-	if role != "admin" {
-		return nil, fmt.Errorf("only admins can generate reports")
+	if role != "admin" && role != "manager" {
+		return nil, fmt.Errorf("only admins and managers can generate reports")
 	}
 
 	var companyID uuid.UUID
@@ -404,8 +404,8 @@ func (s *TaskService) GetReports(ctx context.Context, userID string) ([]Report, 
 	}
 	var role string
 	s.AuthDBShards[shard].Raw("SELECT role FROM users WHERE user_id = ?", userID).Scan(&role)
-	if role != "admin" {
-		return nil, fmt.Errorf("only admins can view reports")
+	if role != "admin" && role != "manager" {
+		return nil, fmt.Errorf("only admins and managers can view reports")
 	}
 	var companyID uuid.UUID
 	s.AuthDBShards[shard].Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID)

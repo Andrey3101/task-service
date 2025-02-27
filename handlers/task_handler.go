@@ -153,12 +153,20 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
 		return
 	}
-	if role != "super_admin" && (role == "admin" && task.CreatedBy != userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
-		return
+	if role != "super_admin" && ((role == "admin" || role == "manager") && task.CreatedBy != userID) {
+		var creatorCompanyID uuid.UUID
+		h.Service.AuthDBShards[h.Service.determineUserShard(c.Request.Context(), task.CreatedBy)].Raw(
+			"SELECT company_id FROM users WHERE user_id = ?", task.CreatedBy).Scan(&creatorCompanyID)
+		var userCompanyID uuid.UUID
+		h.Service.AuthDBShards[h.Service.determineUserShard(c.Request.Context(), userID)].Raw(
+			"SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&userCompanyID)
+		if creatorCompanyID != userCompanyID {
+			c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+			return
+		}
 	}
 
-	taskInput.ID = id
+[taskInput.ID](http://taskinput.id/) = id
 	updatedTask, err := h.Service.UpdateTask(c.Request.Context(), userID, &taskInput.Task)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})

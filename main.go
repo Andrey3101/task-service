@@ -140,6 +140,48 @@ func main() {
 		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
 	}
 
+	api.GET("/users", func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		role := c.GetString("role")
+		if role != "manager" && role != "admin" && role != "super_admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Permission denied"})
+			return
+		}
+		var users []struct {
+			UserID string `gorm:"column:user_id"`
+			Role   string `gorm:"column:role"`
+		}
+		shard := taskService.determineUserShard(c.Request.Context(), userID)
+		taskService.AuthDBShards[shard].Raw("SELECT user_id, role FROM users WHERE company_id = (SELECT company_id FROM users WHERE user_id = ?)", userID).Scan(&users)
+		c.JSON(http.StatusOK, users)
+	})
+
+	api.PUT("/users/:id", func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		role := c.GetString("role")
+		if role != "manager" && role != "admin" && role != "super_admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Permission denied"})
+			return
+		}
+		targetID := c.Param("id")
+		var input struct {
+			PhoneNumber string `json:"phone_number"`
+		}
+		if err := c.BindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+			return
+		}
+		shard := taskService.determineUserShard(c.Request.Context(), userID)
+		err := taskService.AuthDBShards[shard].Exec(
+			"UPDATE users SET phone_number = ? WHERE user_id = ? AND company_id = (SELECT company_id FROM users WHERE user_id = ?)",
+			input.PhoneNumber, targetID, userID).Error
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Server error"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "User updated"})
+	})
+
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 	})
