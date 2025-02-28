@@ -20,7 +20,7 @@ func LoadConfig() Config {
 	return Config{
 		JWTSecret:           os.Getenv("JWT_SECRET", "your_initial_secret_key"),
 		JWTRotationInterval: 86400,
-		DBConn:              os.Getenv("DB_CONN", "postgres://user:password@localhost:5432/tasks?sslmode=disable"),
+		DBConn:              os.Getenv("DB_CONN", "postgres://postres:mysecretpassword@localhost:5432/tasks?sslmode=disable"),
 		RabbitMQ:            os.Getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		Port:                os.Getenv("PORT", "8082"),
 		RedisAddr:           os.Getenv("REDIS_ADDR", "localhost:6379"),
