@@ -1,3 +1,14 @@
+package auth
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/andre/task-service/config"
+	"github.com/gin-gonic/gin"
+)
+
 func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -21,6 +32,7 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		defer resp.Body.Close() // Добавлено закрытие тела ответа
 
 		var user struct {
 			UserID string `json:"user_id"`

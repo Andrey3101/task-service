@@ -2,7 +2,7 @@ package services
 
 import (
 	"context"
-	"tasks-service/models"
+	"task-service/models"
 	"testing"
 	"time"
 

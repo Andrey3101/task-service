@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"tasks-service/config"
+	"task-service/config"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -19,23 +18,14 @@ type AuthService struct {
 	RoleCache     sync.Map
 	CurrentSecret string
 	OldSecret     string
-	AuthDBShards  map[int]*gorm.DB // Добавлено для управления пользователями
+	DB            *gorm.DB // Единая база данных вместо шардов
 }
 
-func NewAuthService(cfg config.Config) *AuthService {
-	authDBShards := make(map[int]*gorm.DB)
-	for i := 0; i < 2; i++ {
-		dsn := fmt.Sprintf("postgres://user:password@localhost:5432/tasks?sslmode=disable&search_path=auth_shard_%d", i)
-		shardDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-		if err != nil {
-			log.Fatalf("Failed to connect to auth_shard_%d: %v", i, err)
-		}
-		authDBShards[i] = shardDB
-	}
+func NewAuthService(cfg config.Config, db *gorm.DB) *AuthService {
 	service := &AuthService{
 		Config:        cfg,
 		CurrentSecret: cfg.JWTSecret,
-		AuthDBShards:  authDBShards,
+		DB:            db, // Используем одну базу данных
 	}
 	go service.rotateKeys()
 	return service
@@ -86,9 +76,6 @@ func (s *AuthService) GenerateToken(userID string, role string) (string, error) 
 }
 
 func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
-	if _, err := s.Redis.Get(context.Background(), "blacklist:"+tokenString).Result(); err == nil {
-		return nil, fmt.Errorf("token is blacklisted")
-	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(s.CurrentSecret), nil
 	})
@@ -122,12 +109,10 @@ func (s *AuthService) GetRole(userID string) (string, bool) {
 }
 
 func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role string) error {
-	creatorShard := s.determineUserShard(ctx, creatorID)
-	if creatorShard == -1 {
+	var creatorRole string
+	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", creatorID).Scan(&creatorRole).Error; err != nil {
 		return fmt.Errorf("creator not found")
 	}
-	var creatorRole string
-	s.AuthDBShards[creatorShard].Raw("SELECT role FROM users WHERE user_id = ?", creatorID).Scan(&creatorRole)
 	if creatorRole != "manager" && creatorRole != "admin" && creatorRole != "super_admin" {
 		return fmt.Errorf("only managers, admins, and super_admins can create users")
 	}
@@ -135,43 +120,26 @@ func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role
 		return fmt.Errorf("managers can only create users with role 'user'")
 	}
 	var companyID uuid.UUID
-	s.AuthDBShards[creatorShard].Raw("SELECT company_id FROM users WHERE user_id = ?", creatorID).Scan(&companyID)
+	s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", creatorID).Scan(&companyID)
 	newUser := struct {
 		UserID    string    `gorm:"column:user_id"`
 		Role      string    `gorm:"column:role"`
 		CompanyID uuid.UUID `gorm:"column:company_id"`
 	}{UserID: newUserID, Role: role, CompanyID: companyID}
-	return s.AuthDBShards[creatorShard].WithContext(ctx).Table("users").Create(&newUser).Error
+	return s.DB.WithContext(ctx).Table("users").Create(&newUser).Error
 }
 
 func (s *AuthService) UpdateUserRole(ctx context.Context, updaterID, targetUserID, newRole string) error {
-	updaterShard := s.determineUserShard(ctx, updaterID)
-	if updaterShard == -1 {
+	var updaterRole string
+	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", updaterID).Scan(&updaterRole).Error; err != nil {
 		return fmt.Errorf("updater not found")
 	}
-	var updaterRole string
-	s.AuthDBShards[updaterShard].Raw("SELECT role FROM users WHERE user_id = ?", updaterID).Scan(&updaterRole)
 	if updaterRole != "manager" && updaterRole != "admin" && updaterRole != "super_admin" {
 		return fmt.Errorf("only managers, admins, and super_admins can update roles")
 	}
 	if newRole != "user" && updaterRole != "admin" && updaterRole != "super_admin" {
 		return fmt.Errorf("managers can only set role to 'user'")
 	}
-	targetShard := s.determineUserShard(ctx, targetUserID)
-	if targetShard == -1 {
-		return fmt.Errorf("target user not found")
-	}
-	return s.AuthDBShards[targetShard].WithContext(ctx).Exec(
+	return s.DB.WithContext(ctx).Exec(
 		"UPDATE users SET role = ? WHERE user_id = ?", newRole, targetUserID).Error
-}
-
-func (s *AuthService) determineUserShard(ctx context.Context, userID string) int {
-	for shard, db := range s.AuthDBShards {
-		var count int64
-		db.WithContext(ctx).Raw("SELECT COUNT(*) FROM users WHERE user_id = ?", userID).Scan(&count)
-		if count > 0 {
-			return shard
-		}
-	}
-	return -1
 }

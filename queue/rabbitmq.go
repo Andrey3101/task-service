@@ -3,10 +3,11 @@ package queue
 import (
 	"encoding/json"
 	"log"
-	"tasks-service/config"
-	"tasks-service/models"
-	"tasks-service/services"
 
+	"github.com/andre/task-service/config"
+	"github.com/andre/task-service/models"
+	"github.com/andre/task-service/services"
+	"github.com/google/uuid"
 	"github.com/streadway/amqp"
 )
 
@@ -58,7 +59,6 @@ func (qs *QueueService) StartConsumer() {
 					existingTask.Description = task.Description
 					existingTask.Status = task.Status
 					existingTask.DueDate = task.DueDate
-					existingTask.AssignedTo = task.AssignedTo
 					qs.Service.DB.Save(&existingTask)
 				}
 			} else {

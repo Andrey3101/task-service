@@ -1,0 +1,496 @@
+definitions:
+  models.Assignee:
+    properties:
+      user_id:
+        type: string
+    type: object
+  models.Comment:
+    properties:
+      comment_id:
+        type: string
+      created_at:
+        type: string
+      task_id:
+        type: string
+      text:
+        type: string
+      user_id:
+        type: string
+    type: object
+  models.Task:
+    properties:
+      assignees:
+        items:
+          $ref: '#/definitions/models.Assignee'
+        type: array
+      comments:
+        items:
+          $ref: '#/definitions/models.Comment'
+        type: array
+      created_at:
+        type: string
+      created_by:
+        type: string
+      description:
+        type: string
+      due_date:
+        type: string
+      status:
+        type: string
+      task_id:
+        type: string
+      title:
+        type: string
+    type: object
+  services.Dashboard:
+    properties:
+      employee_load:
+        items:
+          $ref: '#/definitions/services.EmployeeLoad'
+        type: array
+      overdue_tasks:
+        type: integer
+      task_count:
+        type: integer
+    type: object
+  services.EmployeeLoad:
+    properties:
+      task_count:
+        type: integer
+      total_priority:
+        type: integer
+      user_id:
+        type: string
+    type: object
+  services.Report:
+    properties:
+      company_id:
+        type: string
+      created_at:
+        type: string
+      data:
+        type: string
+      period:
+        type: string
+      report_id:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /tasks:
+    get:
+      description: Retrieve tasks with optional filters
+      parameters:
+      - description: Task status
+        in: query
+        name: status
+        type: string
+      - description: Due date (YYYY-MM-DD)
+        in: query
+        name: due_date
+        type: string
+      - default: 10
+        description: Limit
+        in: query
+        name: limit
+        type: integer
+      - default: 0
+        description: Offset
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'response" {"tasks": "array", "total": "int"}'
+          schema:
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get list of tasks
+      tags:
+      - tasks
+  /tasks/{id}:
+    delete:
+      description: Delete a task by ID
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: message response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Delete a task
+      tags:
+      - tasks
+    put:
+      consumes:
+      - application/json
+      description: Update task details and assignees
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task data
+        in: body
+        name: task
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Task'
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Update a task
+      tags:
+      - tasks
+  /tasks/{id}/comments:
+    post:
+      consumes:
+      - application/json
+      description: Add a comment to a specific task
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Comment text
+        in: body
+        name: comment
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Comment'
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Add a comment to a task
+      tags:
+      - tasks
+  /tasks/bulk_assign:
+    post:
+      consumes:
+      - application/json
+      description: Assign multiple tasks to a single user
+      parameters:
+      - description: Task assignment request
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: message response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Bulk assign tasks
+      tags:
+      - tasks
+  /tasks/create:
+    post:
+      consumes:
+      - application/json
+      description: Create a task with optional assignees
+      parameters:
+      - description: Task data
+        in: body
+        name: task
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Task'
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a new task
+      tags:
+      - tasks
+  /tasks/create/predictive:
+    post:
+      consumes:
+      - application/json
+      description: Create a task based on text with predictive suggestions
+      parameters:
+      - description: Task creation request
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Task'
+        "400":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a task with predictive input
+      tags:
+      - tasks
+  /tasks/dashboard:
+    get:
+      description: Retrieve dashboard data with filters
+      parameters:
+      - description: Filter by date (YYYY-MM-DD)
+        in: query
+        name: date
+        type: string
+      - description: Filter by status
+        in: query
+        name: status
+        type: string
+      - description: Filter by user ID
+        in: query
+        name: user_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/services.Dashboard'
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get admin dashboard
+      tags:
+      - tasks
+  /tasks/my:
+    get:
+      description: Retrieve tasks assigned to the current user
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'response" {"tasks": "array"}'
+          schema:
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get user's tasks
+      tags:
+      - tasks
+  /tasks/report:
+    post:
+      description: Generate a report for a specified period
+      parameters:
+      - description: Period (day, week, month)
+        in: query
+        name: period
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/services.Report'
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Generate a report
+      tags:
+      - tasks
+  /tasks/report/quick:
+    post:
+      description: Generate a report for a specified period with default week
+      parameters:
+      - default: week
+        description: Period (day, week, month)
+        in: query
+        name: period
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/services.Report'
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Generate a quick report
+      tags:
+      - tasks
+  /tasks/reports:
+    get:
+      description: Retrieve all reports for the user's company
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/services.Report'
+            type: array
+        "403":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get list of reports
+      tags:
+      - tasks
+  /tasks/suggestions:
+    get:
+      description: Retrieve contextual suggestions based on text input
+      parameters:
+      - description: Input text for suggestions
+        in: query
+        name: text
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'response" {"suggestions": "array"}'
+          schema:
+            type: object
+        "500":
+          description: error response
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get task suggestions
+      tags:
+      - tasks
+swagger: "2.0"

@@ -3,10 +3,11 @@ package handlers
 import (
 	"net/http"
 	"strconv"
-	"tasks-service/config"
-	"tasks-service/models"
-	"tasks-service/services"
 	"time"
+
+	"github.com/andre/task-service/config"
+	"github.com/andre/task-service/models"
+	"github.com/andre/task-service/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -44,8 +45,8 @@ func (h *TaskHandler) getErrorMessage(key string) string {
 // @Produce json
 // @Param task body object true "Task data" {"title": "string", "description": "string", "status": "string", "due_date": "string", "priority": "int", "assignee_ids": ["string"]}
 // @Success 201 {object} models.Task
-// @Failure 400 {object} gin.H
-// @Failure 500 {object} gin.H
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/create [post]
 func (h *TaskHandler) CreateTask(c *gin.Context) {
 	var taskInput struct {
@@ -85,8 +86,8 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 // @Param due_date query string false "Due date (YYYY-MM-DD)"
 // @Param limit query int false "Limit" default(10)
 // @Param offset query int false "Offset" default(0)
-// @Success 200 {object} object {"tasks": []models.Task, "total": "int"}
-// @Failure 500 {object} gin.H
+// @Success 200 {object} object "response" {"tasks": "array", "total": "int"}
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks [get]
 func (h *TaskHandler) GetTasks(c *gin.Context) {
 	status := c.Query("status")
@@ -125,43 +126,25 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 // @Param id path string true "Task ID"
 // @Param task body object true "Task data" {"title": "string", "description": "string", "status": "string", "due_date": "string", "priority": "int", "assignee_ids": ["string"]}
 // @Success 200 {object} models.Task
-// @Failure 400 {object} gin.H
-// @Failure 403 {object} gin.H
-// @Failure 404 {object} gin.H
-// @Failure 500 {object} gin.H
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/{id} [put]
 func (h *TaskHandler) UpdateTask(c *gin.Context) {
-	taskID, err := uuid.Parse(c.Param("id"))
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
-        return
-    }
-    var updates struct {
-        Title       string    `json:"title" binding:"max=255"` // Ограничение длины
-        Description string    `json:"description" binding:"max=1000"`
-        Status      string    `json:"status" binding:"oneof=pending in_progress completed"`
-        DueDate     time.Time `json:"due_date"`
-    }
-    if err := c.ShouldBindJSON(&updates); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    task, err := h.Service.UpdateTask(c.Request.Context(), c.GetString("user_id"), &models.Task{
-        ID:          taskID,
-        Title:       updates.Title,
-        Description: updates.Description,
-        Status:      updates.Status,
-        DueDate:     updates.DueDate,
-    })
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
-    c.JSON(http.StatusOK, task)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
 
 	var taskInput struct {
-		models.Task
-		AssigneeIDs []string `json:"assignee_ids"`
+		Title       string    `json:"title" binding:"max=255"`
+		Description string    `json:"description" binding:"max=1000"`
+		Status      string    `json:"status" binding:"oneof=pending in_progress completed"`
+		DueDate     time.Time `json:"due_date"`
+		Priority    int       `json:"priority"`
+		AssigneeIDs []string  `json:"assignee_ids"`
 	}
 	if err := c.ShouldBindJSON(&taskInput); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
@@ -170,37 +153,39 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 
 	userID := c.GetString("user_id")
 	role := c.GetString("role")
-	task := h.Service.GetTask(c.Request.Context(), id)
+	task := h.Service.GetTask(c.Request.Context(), id) // Предполагается, что GetTask возвращает *Task без ошибки
 	if task == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
 		return
 	}
+
+	// Убрано шардирование, проверка прав доступа упрощена
 	if role != "super_admin" && ((role == "admin" || role == "manager") && task.CreatedBy != userID) {
-		var creatorCompanyID uuid.UUID
-		h.Service.AuthDBShards[h.Service.determineUserShard(c.Request.Context(), task.CreatedBy)].Raw(
-			"SELECT company_id FROM users WHERE user_id = ?", task.CreatedBy).Scan(&creatorCompanyID)
-		var userCompanyID uuid.UUID
-		h.Service.AuthDBShards[h.Service.determineUserShard(c.Request.Context(), userID)].Raw(
-			"SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&userCompanyID)
-		if creatorCompanyID != userCompanyID {
-			c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
-			return
-		}
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
 	}
 
-[taskInput.ID](http://taskinput.id/) = id
-	updatedTask, err := h.Service.UpdateTask(c.Request.Context(), userID, &taskInput.Task)
+	updatedTask := models.Task{
+		ID:          id,
+		Title:       taskInput.Title,
+		Description: taskInput.Description,
+		Status:      taskInput.Status,
+		DueDate:     taskInput.DueDate,
+		Priority:    taskInput.Priority,
+	}
+	task, err = h.Service.UpdateTask(c.Request.Context(), userID, &updatedTask)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
 	}
+
 	for _, assigneeID := range taskInput.AssigneeIDs {
 		if err := h.Service.AddAssignee(c.Request.Context(), id, assigneeID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 			return
 		}
 	}
-	c.JSON(http.StatusOK, updatedTask)
+	c.JSON(http.StatusOK, task)
 }
 
 // DeleteTask godoc
@@ -208,9 +193,9 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 // @Description Delete a task by ID
 // @Tags tasks
 // @Param id path string true "Task ID"
-// @Success 200 {object} gin.H
-// @Failure 400 {object} gin.H
-// @Failure 500 {object} gin.H
+// @Success 200 {object} map[string]string "message response"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/{id} [delete]
 func (h *TaskHandler) DeleteTask(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
@@ -236,8 +221,8 @@ func (h *TaskHandler) DeleteTask(c *gin.Context) {
 // @Param id path string true "Task ID"
 // @Param comment body object true "Comment text" {"text": "string"}
 // @Success 201 {object} models.Comment
-// @Failure 400 {object} gin.H
-// @Failure 500 {object} gin.H
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/{id}/comments [post]
 func (h *TaskHandler) AddComment(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
@@ -270,7 +255,7 @@ func (h *TaskHandler) AddComment(c *gin.Context) {
 // @Produce json
 // @Param period query string true "Period (day, week, month)"
 // @Success 200 {object} services.Report
-// @Failure 403 {object} gin.H
+// @Failure 403 {object} map[string]string "error response"
 // @Router /tasks/report [post]
 func (h *TaskHandler) GenerateReport(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -289,7 +274,7 @@ func (h *TaskHandler) GenerateReport(c *gin.Context) {
 // @Tags tasks
 // @Produce json
 // @Success 200 {array} services.Report
-// @Failure 403 {object} gin.H
+// @Failure 403 {object} map[string]string "error response"
 // @Router /tasks/reports [get]
 func (h *TaskHandler) GetReports(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -309,8 +294,8 @@ func (h *TaskHandler) GetReports(c *gin.Context) {
 // @Produce json
 // @Param request body object true "Task creation request" {"text": "string", "confirm_suggestion": "bool", "suggestion_action": "object"}
 // @Success 201 {object} models.Task
-// @Failure 400 {object} gin.H
-// @Failure 500 {object} gin.H
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/create/predictive [post]
 func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -341,8 +326,8 @@ func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
 // @Param status query string false "Filter by status"
 // @Param user_id query string false "Filter by user ID"
 // @Success 200 {object} services.Dashboard
-// @Failure 403 {object} gin.H
-// @Failure 404 {object} gin.H
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
 // @Router /tasks/dashboard [get]
 func (h *TaskHandler) GetDashboard(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -368,8 +353,8 @@ func (h *TaskHandler) GetDashboard(c *gin.Context) {
 // @Description Retrieve tasks assigned to the current user
 // @Tags tasks
 // @Produce json
-// @Success 200 {object} object {"tasks": []models.Task}
-// @Failure 500 {object} gin.H
+// @Success 200 {object} object "response" {"tasks": "array"}
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/my [get]
 func (h *TaskHandler) GetMyTasks(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -387,8 +372,8 @@ func (h *TaskHandler) GetMyTasks(c *gin.Context) {
 // @Tags tasks
 // @Produce json
 // @Param text query string true "Input text for suggestions"
-// @Success 200 {object} object {"suggestions": []services.Suggestion}
-// @Failure 500 {object} gin.H
+// @Success 200 {object} object "response" {"suggestions": "array"}
+// @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/suggestions [get]
 func (h *TaskHandler) GetTaskSuggestions(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -408,7 +393,7 @@ func (h *TaskHandler) GetTaskSuggestions(c *gin.Context) {
 // @Produce json
 // @Param period query string false "Period (day, week, month)" default(week)
 // @Success 200 {object} services.Report
-// @Failure 403 {object} gin.H
+// @Failure 403 {object} map[string]string "error response"
 // @Router /tasks/report/quick [post]
 func (h *TaskHandler) GenerateQuickReport(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -431,9 +416,9 @@ func (h *TaskHandler) GenerateQuickReport(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param request body object true "Task assignment request" {"task_ids": ["string"], "assignee_id": "string"}
-// @Success 200 {object} gin.H
-// @Failure 400 {object} gin.H
-// @Failure 403 {object} gin.H
+// @Success 200 {object} map[string]string "message response"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
 // @Router /tasks/bulk_assign [post]
 func (h *TaskHandler) BulkAssignTasks(c *gin.Context) {
 	userID := c.GetString("user_id")

@@ -2,25 +2,25 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"regexp"
-	"tasks-service/config"
-	"tasks-service/handlers"
-	"tasks-service/middleware"
-	"tasks-service/migrations"
-	"tasks-service/queue"
-	"tasks-service/services"
 	"time"
 
-	_ "tasks-service/docs"
+	"github.com/andre/task-service/config"
+	"github.com/andre/task-service/handlers"
+	"github.com/andre/task-service/middleware"
+	"github.com/andre/task-service/queue"
+	"github.com/andre/task-service/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/streadway/amqp"
+	"github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -35,14 +35,15 @@ var upgrader = websocket.Upgrader{
 func main() {
 	cfg := config.LoadConfig()
 
-	migrations.RunMigrations(cfg.DBConn)
-
-	pool, err := pgxpool.New(context.Background(), cfg.DBConn)
+	dbConn, err := sql.Open("pgx", cfg.DBConn)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer pool.Close()
-	db, err := gorm.Open(postgres.New(postgres.Config{Conn: pool}), &gorm.Config{})
+	defer dbConn.Close()
+
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		Conn: dbConn,
+	}), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to initialize GORM: %v", err)
 	}
@@ -61,7 +62,7 @@ func main() {
 	}
 	defer rabbitCh.Close()
 
-	authService := services.NewAuthService(cfg)
+	authService := services.NewAuthService(cfg, redisClient, db)
 	taskService := services.NewTaskService(db, redisClient, rabbitCh, cfg)
 	taskHandler := handlers.NewTaskHandler(taskService, cfg)
 	queueService := queue.NewQueueService(cfg, taskService)
@@ -71,7 +72,6 @@ func main() {
 	r := gin.Default()
 	r.Use(middleware.AuthMiddleware(authService))
 
-	// WebSocket для обновлений задач
 	r.GET("/ws/tasks", func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
@@ -123,39 +123,6 @@ func main() {
 			}
 		}
 	})
-
-	// Эндпоинты Google Calendar
-	r.GET("/google/auth", func(c *gin.Context) {
-		url := taskService.GoogleCalendar.GetAuthURL()
-		c.JSON(http.StatusOK, gin.H{"url": url})
-	})
-
-	r.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		if err := taskService.GoogleCalendar.Authenticate(c.Request.Context(), code); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authenticate with Google"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"message": "Google Calendar authenticated"})
-	})
-
-	// Эндпоинты задач
-	api := r.Group("/tasks")
-	{
-		api.POST("/create", taskHandler.CreateTask)
-		api.GET("", taskHandler.GetTasks)
-		api.PUT("/:id", taskHandler.UpdateTask)
-		api.DELETE("/:id", taskHandler.DeleteTask)
-		api.POST("/:id/comments", taskHandler.AddComment)
-		api.POST("/report", taskHandler.GenerateReport)
-		api.GET("/reports", taskHandler.GetReports)
-		api.POST("/create/predictive", taskHandler.CreateTaskWithPrediction)
-		api.GET("/dashboard", taskHandler.GetDashboard)
-		api.GET("/my", taskHandler.GetMyTasks)
-		api.GET("/suggestions", taskHandler.GetTaskSuggestions)
-		api.POST("/report/quick", taskHandler.GenerateQuickReport)
-		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
-	}
 
 	r.GET("/google/auth", func(c *gin.Context) {
 		url := taskService.GoogleCalendar.GetAuthURL()
@@ -235,7 +202,24 @@ func main() {
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
 	})
-	// Эндпоинты управления пользователями
+
+	api := r.Group("/tasks")
+	{
+		api.POST("/create", taskHandler.CreateTask)
+		api.GET("", taskHandler.GetTasks)
+		api.PUT("/:id", taskHandler.UpdateTask)
+		api.DELETE("/:id", taskHandler.DeleteTask)
+		api.POST("/:id/comments", taskHandler.AddComment)
+		api.POST("/report", taskHandler.GenerateReport)
+		api.GET("/reports", taskHandler.GetReports)
+		api.POST("/create/predictive", taskHandler.CreateTaskWithPrediction)
+		api.GET("/dashboard", taskHandler.GetDashboard)
+		api.GET("/my", taskHandler.GetMyTasks)
+		api.GET("/suggestions", taskHandler.GetTaskSuggestions)
+		api.POST("/report/quick", taskHandler.GenerateQuickReport)
+		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
+	}
+
 	api.GET("/users", func(c *gin.Context) {
 		userID := c.GetString("user_id")
 		role := c.GetString("role")
@@ -247,8 +231,7 @@ func main() {
 			UserID string `gorm:"column:user_id"`
 			Role   string `gorm:"column:role"`
 		}
-		shard := taskService.determineUserShard(c.Request.Context(), userID)
-		taskService.AuthDBShards[shard].Raw("SELECT user_id, role FROM users WHERE company_id = (SELECT company_id FROM users WHERE user_id = ?)", userID).Scan(&users)
+		db.Raw("SELECT user_id, role FROM users WHERE company_id = (SELECT company_id FROM users WHERE user_id = ?)", userID).Scan(&users)
 		c.JSON(http.StatusOK, users)
 	})
 
@@ -272,8 +255,7 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid phone number format"})
 			return
 		}
-		shard := taskService.determineUserShard(c.Request.Context(), userID)
-		err := taskService.AuthDBShards[shard].Exec(
+		err := db.Exec(
 			"UPDATE users SET phone_number = ? WHERE user_id = ? AND company_id = (SELECT company_id FROM users WHERE user_id = ?)",
 			input.PhoneNumber, targetID, userID).Error
 		if err != nil {

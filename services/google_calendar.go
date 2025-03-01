@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
-	"tasks-service/config"
+	"task-service/config"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -44,7 +44,6 @@ func (s *GoogleCalendarService) Authenticate(ctx context.Context, code string) e
 		return err
 	}
 	s.Client = client
-	// Сохраняем токен в Redis
 	tokenJSON, _ := json.Marshal(token)
 	s.Redis.Set(ctx, "google_calendar_token", tokenJSON, 0)
 	return nil

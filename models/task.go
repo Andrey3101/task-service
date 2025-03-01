@@ -1,4 +1,3 @@
-// models/task.go
 package models
 
 import (
@@ -17,6 +16,8 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	Assignees   []Assignee `json:"assignees" gorm:"many2many:task_assignees"`
 	Comments    []Comment  `json:"comments" gorm:"foreignKey:TaskID"`
+	AssigneeIDs []string   `gorm:"type:text[]" json:"assignee_ids,omitempty"`
+	Priority    int        `json:"priority" gorm:"type:integer"` // Добавлено поле Priority
 }
 
 type Assignee struct {

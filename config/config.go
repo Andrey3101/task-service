@@ -3,28 +3,39 @@ package config
 import "os"
 
 type Config struct {
-	JWTSecret           string // Текущий секретный ключ для JWT
-	JWTRotationInterval int    // Интервал ротации ключа в секундах (по умолчанию 86400 = 1 день)
-	DBConn              string // Строка подключения к PostgreSQL
-	RabbitMQ            string // URL для RabbitMQ
-	Port                string // Порт сервиса
-	RedisAddr           string // Адрес Redis
-	JWTSecretOld        string // Старый ключ для переходного периода
-	Language            string // Язык интерфейса ("en" или "ru")
-	GoogleClientID      string `env:"GOOGLE_CLIENT_ID" default:"your-google-client-id"`
-	GoogleClientSecret  string `env:"GOOGLE_CLIENT_SECRET" default:"your-google-client-secret"`
-	GoogleRedirectURI   string `env:"GOOGLE_REDIRECT_URI" default:"http://localhost:8082/google/callback"`
+	JWTSecret           string
+	JWTRotationInterval int
+	DBConn              string
+	RabbitMQ            string
+	Port                string
+	RedisAddr           string
+	JWTSecretOld        string
+	Language            string
+	GoogleClientID      string
+	GoogleClientSecret  string
+	GoogleRedirectURI   string
 }
 
 func LoadConfig() Config {
 	return Config{
-		JWTSecret:           os.Getenv("JWT_SECRET", "your_initial_secret_key"),
+		JWTSecret:           getEnv("JWT_SECRET", "your_initial_secret_key"),
 		JWTRotationInterval: 86400,
-		DBConn:              os.Getenv("DB_CONN", "postgres://postres:mysecretpassword@localhost:5432/tasks?sslmode=disable"),
-		RabbitMQ:            os.Getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
-		Port:                os.Getenv("PORT", "8082"),
-		RedisAddr:           os.Getenv("REDIS_ADDR", "localhost:6379"),
-		JWTSecretOld:        os.Getenv("JWT_SECRET_OLD", ""),
-		Language:            os.Getenv("LANGUAGE", "en"),
+		DBConn:              getEnv("DB_CONN", "postgres://postgres:mysecretpassword@localhost:5432/tasks?sslmode=disable"),
+		RabbitMQ:            getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+		Port:                getEnv("PORT", "8082"),
+		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
+		JWTSecretOld:        getEnv("JWT_SECRET_OLD", ""),
+		Language:            getEnv("LANGUAGE", "en"),
+		GoogleClientID:      getEnv("GOOGLE_CLIENT_ID", "your-google-client-id"),
+		GoogleClientSecret:  getEnv("GOOGLE_CLIENT_SECRET", "your-google-client-secret"),
+		GoogleRedirectURI:   getEnv("GOOGLE_REDIRECT_URI", "http://localhost:8082/google/callback"),
 	}
+}
+
+// getEnv получает значение переменной окружения или возвращает дефолтное значение
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
 }

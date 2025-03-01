@@ -1,5 +1,20 @@
 # Task-Service
 
+├── go.mod
+├── go.sum
+├── main.go
+├── config\
+│   └── (файлы, например, config.go)
+├── handlers\
+│   └── (файлы, например, task_handler.go)
+├── middleware\
+│   └── (файлы, например, middleware.go)
+├── queue\
+│   └── (файлы, например, queue.go)
+├── services\
+│   └── (файлы, например, task_service.go, auth_service.go, google_calendar.go)
+└── Dockerfile
+
 Сервис управления задачами с автоматическим распределением нагрузки.
 
 ## Текущая схема
