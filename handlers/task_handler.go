@@ -153,8 +153,9 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 
 	userID := c.GetString("user_id")
 	role := c.GetString("role")
-	task := h.Service.GetTask(c.Request.Context(), id) // Предполагается, что GetTask возвращает *Task без ошибки
-	if task == nil {
+	// Исправлено: GetTask возвращает *models.Task и error
+	task, err := h.Service.GetTask(c.Request.Context(), id)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
 		return
 	}

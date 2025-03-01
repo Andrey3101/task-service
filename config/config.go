@@ -20,10 +20,10 @@ func LoadConfig() Config {
 	return Config{
 		JWTSecret:           getEnv("JWT_SECRET", "your_initial_secret_key"),
 		JWTRotationInterval: 86400,
-		DBConn:              getEnv("DB_CONN", "postgres://postgres:mysecretpassword@localhost:5432/tasks?sslmode=disable"),
-		RabbitMQ:            getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+		DBConn:              getEnv("DB_CONN", "postgresql://postgres:mysecretpassword@host.docker.internal:5432/tasks"),
+		RabbitMQ:            getEnv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/"),
 		Port:                getEnv("PORT", "8082"),
-		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisAddr:           getEnv("REDIS_ADDR", "redis:6379"),
 		JWTSecretOld:        getEnv("JWT_SECRET_OLD", ""),
 		Language:            getEnv("LANGUAGE", "en"),
 		GoogleClientID:      getEnv("GOOGLE_CLIENT_ID", "your-google-client-id"),
@@ -32,7 +32,6 @@ func LoadConfig() Config {
 	}
 }
 
-// getEnv получает значение переменной окружения или возвращает дефолтное значение
 func getEnv(key, defaultValue string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value

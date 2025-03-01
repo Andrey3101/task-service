@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"task-service/config"
 	"time"
 
+	"github.com/andre/task-service/config"
+	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -18,14 +19,16 @@ type AuthService struct {
 	RoleCache     sync.Map
 	CurrentSecret string
 	OldSecret     string
-	DB            *gorm.DB // Единая база данных вместо шардов
+	Redis         *redis.Client
+	DB            *gorm.DB
 }
 
-func NewAuthService(cfg config.Config, db *gorm.DB) *AuthService {
+func NewAuthService(cfg config.Config, redisClient *redis.Client, db *gorm.DB) *AuthService {
 	service := &AuthService{
 		Config:        cfg,
 		CurrentSecret: cfg.JWTSecret,
-		DB:            db, // Используем одну базу данных
+		Redis:         redisClient,
+		DB:            db,
 	}
 	go service.rotateKeys()
 	return service
@@ -76,6 +79,9 @@ func (s *AuthService) GenerateToken(userID string, role string) (string, error) 
 }
 
 func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
+	if _, err := s.Redis.Get(context.Background(), "blacklist:"+tokenString).Result(); err == nil {
+		return nil, fmt.Errorf("token is blacklisted")
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(s.CurrentSecret), nil
 	})
@@ -111,7 +117,7 @@ func (s *AuthService) GetRole(userID string) (string, bool) {
 func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role string) error {
 	var creatorRole string
 	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", creatorID).Scan(&creatorRole).Error; err != nil {
-		return fmt.Errorf("creator not found")
+		return fmt.Errorf("creator not found: %v", err)
 	}
 	if creatorRole != "manager" && creatorRole != "admin" && creatorRole != "super_admin" {
 		return fmt.Errorf("only managers, admins, and super_admins can create users")
@@ -132,7 +138,7 @@ func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role
 func (s *AuthService) UpdateUserRole(ctx context.Context, updaterID, targetUserID, newRole string) error {
 	var updaterRole string
 	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", updaterID).Scan(&updaterRole).Error; err != nil {
-		return fmt.Errorf("updater not found")
+		return fmt.Errorf("updater not found: %v", err)
 	}
 	if updaterRole != "manager" && updaterRole != "admin" && updaterRole != "super_admin" {
 		return fmt.Errorf("only managers, admins, and super_admins can update roles")
@@ -140,6 +146,5 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, updaterID, targetUserI
 	if newRole != "user" && updaterRole != "admin" && updaterRole != "super_admin" {
 		return fmt.Errorf("managers can only set role to 'user'")
 	}
-	return s.DB.WithContext(ctx).Exec(
-		"UPDATE users SET role = ? WHERE user_id = ?", newRole, targetUserID).Error
+	return s.DB.WithContext(ctx).Exec("UPDATE users SET role = ? WHERE user_id = ?", newRole, targetUserID).Error
 }

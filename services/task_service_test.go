@@ -2,9 +2,10 @@ package services
 
 import (
 	"context"
-	"task-service/models"
 	"testing"
 	"time"
+
+	"github.com/andre/task-service/models"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"

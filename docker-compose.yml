@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DBConn: postgres://user:password@postgres:5432/tasks?sslmode=disable
+      DB_CONN: postgresql://postgres:mysecretpassword@host.docker.internal:5432/postgres
       RedisAddr: redis:6379
       RabbitMQ: amqp://guest:guest@rabbitmq:5672/
       GOOGLE_CLIENT_ID: your-google-client-id
@@ -41,6 +41,14 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    ports:
+      - "5672:5672"  # Основной порт RabbitMQ
+      - "15672:15672" # Порт веб-интерфейса управления
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - app-network
 

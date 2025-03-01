@@ -3,7 +3,8 @@ package middleware
 import (
 	"net/http"
 	"strings"
-	"task-service/services"
+
+	"github.com/andre/task-service/services"
 
 	"github.com/gin-gonic/gin"
 )

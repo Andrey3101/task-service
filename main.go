@@ -18,7 +18,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/streadway/amqp"
 	"github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -34,13 +33,16 @@ var upgrader = websocket.Upgrader{
 
 func main() {
 	cfg := config.LoadConfig()
+	log.Printf("Connecting to RabbitMQ at: %s", cfg.RabbitMQ)
 
+	// Подключение к базе данных через database/sql
 	dbConn, err := sql.Open("pgx", cfg.DBConn)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer dbConn.Close()
 
+	// Настройка GORM с использованием database/sql
 	db, err := gorm.Open(postgres.New(postgres.Config{
 		Conn: dbConn,
 	}), &gorm.Config{})
@@ -48,12 +50,22 @@ func main() {
 		log.Fatalf("Failed to initialize GORM: %v", err)
 	}
 
+	// Подключение к Redis
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, PoolSize: 10})
 	defer redisClient.Close()
 
-	rabbitConn, err := amqp.Dial(cfg.RabbitMQ)
+	// Подключение к RabbitMQ
+	var rabbitConn *amqp.Connection
+	for i := 0; i < 10; i++ {
+		rabbitConn, err = amqp.Dial(cfg.RabbitMQ)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ (attempt %d): %v", i+1, err)
+		time.Sleep(5 * time.Second) // Ожидание перед следующей попыткой
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after retries: %v", err)
 	}
 	defer rabbitConn.Close()
 	rabbitCh, err := rabbitConn.Channel()
@@ -62,16 +74,20 @@ func main() {
 	}
 	defer rabbitCh.Close()
 
+	// Инициализация сервисов
 	authService := services.NewAuthService(cfg, redisClient, db)
 	taskService := services.NewTaskService(db, redisClient, rabbitCh, cfg)
 	taskHandler := handlers.NewTaskHandler(taskService, cfg)
 	queueService := queue.NewQueueService(cfg, taskService)
 
+	// Запуск потребителя очереди в фоновом режиме
 	go queueService.StartConsumer()
 
+	// Настройка Gin-роутера
 	r := gin.Default()
 	r.Use(middleware.AuthMiddleware(authService))
 
+	// WebSocket для обновлений задач
 	r.GET("/ws/tasks", func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
@@ -124,6 +140,7 @@ func main() {
 		}
 	})
 
+	// Эндпоинты Google Calendar
 	r.GET("/google/auth", func(c *gin.Context) {
 		url := taskService.GoogleCalendar.GetAuthURL()
 		c.JSON(http.StatusOK, gin.H{"url": url})
@@ -203,6 +220,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
 	})
 
+	// Эндпоинты задач
 	api := r.Group("/tasks")
 	{
 		api.POST("/create", taskHandler.CreateTask)
@@ -220,6 +238,7 @@ func main() {
 		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
 	}
 
+	// Эндпоинты управления пользователями
 	api.GET("/users", func(c *gin.Context) {
 		userID := c.GetString("user_id")
 		role := c.GetString("role")
