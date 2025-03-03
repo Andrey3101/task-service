@@ -17,22 +17,11 @@ services:
     ports:
       - "8082:8082"
     depends_on:
-      - postgres
       - redis
       - rabbitmq
     networks:
       - app-network
 
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: tasks
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - app-network
 
   redis:
     image: redis:6

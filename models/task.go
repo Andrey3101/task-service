@@ -7,7 +7,7 @@ import (
 )
 
 type Task struct {
-	ID          uuid.UUID  `json:"task_id" gorm:"type:uuid;primaryKey"`
+	ID          uuid.UUID  `json:"task_id" gorm:"type:uuid;primaryKey;column:task_id"`
 	Title       string     `json:"title" gorm:"not null"`
 	Description string     `json:"description"`
 	Status      string     `json:"status" gorm:"default:pending"`
@@ -17,7 +17,7 @@ type Task struct {
 	Assignees   []Assignee `json:"assignees" gorm:"many2many:task_assignees"`
 	Comments    []Comment  `json:"comments" gorm:"foreignKey:TaskID"`
 	AssigneeIDs []string   `gorm:"type:text[]" json:"assignee_ids,omitempty"`
-	Priority    int        `json:"priority" gorm:"type:integer"` // Добавлено поле Priority
+	Priority    int        `json:"priority" gorm:"type:integer"`
 }
 
 type Assignee struct {

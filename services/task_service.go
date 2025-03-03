@@ -87,6 +87,10 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 		tx.Rollback()
 		return nil, err
 	}
+	if err := tx.Table("tasks").Create(task).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to create task: %v", err)
+	}
 	tx.Commit()
 
 	s.logTaskChange(ctx, task.ID, "created", "", task.Title)
