@@ -58,6 +58,12 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 		return
 	}
 
+	// Добавляем валидацию поля Title
+	if taskInput.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": title is required"})
+		return
+	}
+
 	userID := c.GetString("user_id")
 	taskInput.ID = uuid.New()
 	taskInput.CreatedAt = time.Now()
@@ -77,6 +83,66 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	c.JSON(http.StatusCreated, task)
 }
 
+// GetTaskStats godoc
+// @Summary Get task statistics for dashboard charts
+// @Description Retrieve task statistics for a specific user with filters
+// @Tags tasks
+// @Produce json
+// @Param status query string false "Task status (pending, in_progress, completed)"
+// @Param period query string false "Period (week, yesterday, today, month, year)"
+// @Success 200 {object} map[string]int "statistics response"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /task [get]
+func (h *TaskHandler) GetTaskStats(c *gin.Context) {
+	userID := c.GetString("user_id")
+	status := c.Query("status")
+	period := c.Query("period")
+
+	// Валидация параметров
+	if period != "" && period != "week" && period != "yesterday" && period != "today" && period != "month" && period != "year" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid period"})
+		return
+	}
+	if status != "" && status != "pending" && status != "in_progress" && status != "completed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid status"})
+		return
+	}
+
+	stats, err := h.Service.GetTaskStats(c.Request.Context(), userID, status, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetTask godoc
+// @Summary Get a task by ID
+// @Description Retrieve a specific task with assignees and comments
+// @Tags tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {object} models.Task
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Router /tasks/{id} [get]
+func (h *TaskHandler) GetTask(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	task, err := h.Service.GetTask(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
 // GetTasks godoc
 // @Summary Get list of tasks
 // @Description Retrieve tasks with optional filters
@@ -92,6 +158,9 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 func (h *TaskHandler) GetTasks(c *gin.Context) {
 	status := c.Query("status")
 	dueDateStr := c.Query("due_date")
+	priority := c.Query("priority")
+	assigneeID := c.Query("assignee_id")
+	fields := c.Query("fields") // Новый параметр
 	limit, _ := c.GetQuery("limit")
 	offset, _ := c.GetQuery("offset")
 
@@ -109,7 +178,7 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 	}
 	off, _ := strconv.Atoi(offset)
 
-	tasks, total, err := h.Service.GetTasks(c.Request.Context(), status, dueDate, lim, off)
+	tasks, total, err := h.Service.GetTasks(c.Request.Context(), status, dueDate, priority, assigneeID, fields, lim, off)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
@@ -436,4 +505,95 @@ func (h *TaskHandler) BulkAssignTasks(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Tasks assigned"})
+}
+
+// UpdateComment godoc
+// @Summary Update a comment
+// @Description Update a specific comment for a task
+// @Tags tasks
+// @Accept json
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param comment_id path string true "Comment ID"
+// @Param comment body object true "Comment data" {"text": "string"}
+// @Success 200 {object} models.Comment
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/{id}/comments/{comment_id} [put]
+func (h *TaskHandler) UpdateComment(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	commentID, err := uuid.Parse(c.Param("comment_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	var input struct {
+		Text string `json:"text" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	comment, err := h.Service.UpdateComment(c.Request.Context(), taskID, commentID, userID, input.Text)
+	if err != nil {
+		if err.Error() == "comment not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
+		} else if err.Error() == "permission denied" {
+			c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, comment)
+}
+
+// DeleteComment godoc
+// @Summary Delete a comment
+// @Description Delete a specific comment from a task
+// @Tags tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Param comment_id path string true "Comment ID"
+// @Success 200 {object} map[string]string "message response"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/{id}/comments/{comment_id} [delete]
+func (h *TaskHandler) DeleteComment(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	commentID, err := uuid.Parse(c.Param("comment_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	if err := h.Service.DeleteComment(c.Request.Context(), taskID, commentID, userID); err != nil {
+		if err.Error() == "comment not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
+		} else if err.Error() == "permission denied" {
+			c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Comment deleted"})
 }

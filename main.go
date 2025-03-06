@@ -19,7 +19,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
 	"github.com/streadway/amqp"
-	"github.com/swaggo/files"
+	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -236,6 +236,10 @@ func main() {
 		api.GET("/suggestions", taskHandler.GetTaskSuggestions)
 		api.POST("/report/quick", taskHandler.GenerateQuickReport)
 		api.POST("/bulk_assign", taskHandler.BulkAssignTasks)
+		api.GET("/:id", taskHandler.GetTask)
+		api.PUT("/:id/comments/:comment_id", taskHandler.UpdateComment)
+		api.DELETE("/:id/comments/:comment_id", taskHandler.DeleteComment)
+		api.GET("/task", taskHandler.GetTaskStats)
 	}
 
 	// Эндпоинты управления пользователями

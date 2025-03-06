@@ -18,6 +18,7 @@ type Task struct {
 	Comments    []Comment  `json:"comments" gorm:"foreignKey:TaskID"`
 	AssigneeIDs []string   `gorm:"type:text[]" json:"assignee_ids,omitempty"`
 	Priority    int        `json:"priority" gorm:"type:integer"`
+	Cost        float64    `json:"cost"`
 }
 
 type Assignee struct {

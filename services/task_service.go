@@ -118,8 +118,8 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 	return task, nil
 }
 
-func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time.Time, limit, offset int) ([]models.Task, int, error) {
-	cacheKey := fmt.Sprintf("tasks:%s:%s:%d:%d", status, dueDateString(dueDate), limit, offset)
+func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time.Time, priority, assigneeID, fields string, limit, offset int) ([]models.Task, int, error) {
+	cacheKey := fmt.Sprintf("tasks:%s:%s:%s:%s:%s:%d:%d", status, dueDateString(dueDate), priority, assigneeID, fields, limit, offset)
 	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
 		var result struct {
 			Tasks []models.Task `json:"tasks"`
@@ -130,7 +130,16 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 		}
 	}
 
-	query := s.DB.WithContext(ctx).Limit(limit).Offset(offset).Preload("Assignees").Preload("Comments")
+	query := s.DB.WithContext(ctx).Limit(limit).Offset(offset)
+
+	// Загружаем ассоциации в зависимости от параметра fields
+	if strings.Contains(fields, "assignees") {
+		query = query.Preload("Assignees")
+	}
+	if strings.Contains(fields, "comments") {
+		query = query.Preload("Comments")
+	}
+
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -138,6 +147,12 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 		start := dueDate.Truncate(24 * time.Hour)
 		end := start.Add(24*time.Hour - time.Second)
 		query = query.Where("due_date BETWEEN ? AND ?", start, end)
+	}
+	if priority != "" {
+		query = query.Where("priority = ?", priority)
+	}
+	if assigneeID != "" {
+		query = query.Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)", assigneeID)
 	}
 
 	var total int64
@@ -375,8 +390,101 @@ func (s *TaskService) CreateTaskWithPrediction(ctx context.Context, userID strin
 		}
 		return s.CreateTask(ctx, userID, task, false)
 	}
+
+	// Если текст пустой, устанавливаем заголовок по умолчанию "Новая задача"
+	if text == "" {
+		text = "Новая задача"
+	}
+
 	task := &models.Task{ID: uuid.New(), Title: text, CreatedBy: userID, CreatedAt: time.Now(), Status: "pending"}
 	return s.CreateTask(ctx, userID, task, true)
+}
+
+// GetTaskStats возвращает статистику задач для графиков
+func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period string) (map[string]interface{}, error) {
+	// Кэширование результата
+	cacheKey := fmt.Sprintf("task_stats:%s:%s:%s", userID, status, period)
+	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
+		var stats map[string]interface{}
+		if err := json.Unmarshal(cached, &stats); err == nil {
+			return stats, nil
+		}
+	}
+
+	// Получаем company_id пользователя
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
+	result := map[string]interface{}{
+		"completedLastWeek":       0,
+		"completedYesterday":      0,
+		"inProgressToday":         0,
+		"totalCompletedLastWeek":  0,
+		"totalCompletedYesterday": 0,
+		"weeklyTrends":            map[string]int{}, // Тренды за последние 4 недели
+	}
+
+	// Текущая статистика
+	weekStart := time.Now().AddDate(0, 0, -7)
+	yesterdayStart := time.Now().AddDate(0, 0, -1).Truncate(24 * time.Hour)
+	yesterdayEnd := yesterdayStart.Add(24*time.Hour - time.Second)
+	todayStart := time.Now().Truncate(24 * time.Hour)
+	todayEnd := todayStart.Add(24*time.Hour - time.Second)
+
+	type TaskStats struct {
+		CompletedLastWeek       int
+		CompletedYesterday      int
+		InProgressToday         int
+		TotalCompletedLastWeek  float64
+		TotalCompletedYesterday float64
+	}
+
+	var taskStats TaskStats
+	query := `
+        SELECT
+            SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN 1 ELSE 0 END) as completed_last_week,
+            SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN 1 ELSE 0 END) as completed_yesterday,
+            SUM(CASE WHEN status = 'in_progress' AND updated_at BETWEEN ? AND ? THEN 1 ELSE 0 END) as in_progress_today,
+            COALESCE(SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN cost ELSE 0 END), 0) as total_completed_last_week,
+            COALESCE(SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN cost ELSE 0 END), 0) as total_completed_yesterday
+        FROM tasks
+        WHERE created_by IN (SELECT user_id FROM users WHERE company_id = ?)
+    `
+	if err := s.DB.WithContext(ctx).
+		Raw(query, weekStart, time.Now(), yesterdayStart, yesterdayEnd, todayStart, todayEnd, weekStart, time.Now(), yesterdayStart, yesterdayEnd, companyID).
+		Scan(&taskStats).Error; err != nil {
+		return nil, err
+	}
+
+	result["completedLastWeek"] = taskStats.CompletedLastWeek
+	result["completedYesterday"] = taskStats.CompletedYesterday
+	result["inProgressToday"] = taskStats.InProgressToday
+	result["totalCompletedLastWeek"] = int(taskStats.TotalCompletedLastWeek)
+	result["totalCompletedYesterday"] = int(taskStats.TotalCompletedYesterday)
+
+	// Тренды за последние 4 недели
+	weeklyTrends := make(map[string]int)
+	for i := 0; i < 4; i++ {
+		start := time.Now().AddDate(0, 0, -7*(i+1))
+		end := start.AddDate(0, 0, 7)
+		var count int64
+		s.DB.WithContext(ctx).
+			Model(&models.Task{}).
+			Where("status = 'completed' AND created_by IN (SELECT user_id FROM users WHERE company_id = ?) AND completed_at BETWEEN ? AND ?", companyID, start, end).
+			Count(&count)
+		weekLabel := start.Format("2006-01-02")
+		weeklyTrends[weekLabel] = int(count)
+	}
+	result["weeklyTrends"] = weeklyTrends
+
+	// Сохраняем в кэш
+	if data, err := json.Marshal(result); err == nil {
+		s.Redis.Set(ctx, cacheKey, data, 5*time.Minute)
+	}
+
+	return result, nil
 }
 
 func (s *TaskService) GetDashboard(ctx context.Context, userID string, filters map[string]string) (*Dashboard, error) {
@@ -494,5 +602,65 @@ func (s *TaskService) BulkAssignTasks(ctx context.Context, userID string, taskID
 	}
 	tx.Commit()
 	s.invalidateCache(ctx, "tasks:*")
+	return nil
+}
+
+// UpdateComment обновляет комментарий
+func (s *TaskService) UpdateComment(ctx context.Context, taskID, commentID uuid.UUID, userID, text string) (*models.Comment, error) {
+	var comment models.Comment
+	if err := s.DB.WithContext(ctx).Where("id = ? AND task_id = ?", commentID, taskID).First(&comment).Error; err != nil {
+		return nil, fmt.Errorf("comment not found")
+	}
+
+	if comment.UserID != userID {
+		return nil, fmt.Errorf("permission denied")
+	}
+
+	oldText := comment.Text
+	comment.Text = text
+	if err := s.DB.WithContext(ctx).Save(&comment).Error; err != nil {
+		return nil, err
+	}
+
+	s.logTaskChange(ctx, taskID, "comment_updated", oldText, text)
+	s.invalidateCache(ctx, "tasks:*")
+	event := struct {
+		TaskID    string          `json:"task_id"`
+		Action    string          `json:"action"`
+		Comment   *models.Comment `json:"comment"`
+		CreatedAt time.Time       `json:"created_at"`
+	}{TaskID: taskID.String(), Action: "comment_updated", Comment: &comment, CreatedAt: time.Now()}
+	eventJSON, _ := json.Marshal(event)
+	s.Redis.Publish(ctx, "task_updates", eventJSON)
+
+	return &comment, nil
+}
+
+// DeleteComment удаляет комментарий
+func (s *TaskService) DeleteComment(ctx context.Context, taskID, commentID uuid.UUID, userID string) error {
+	var comment models.Comment
+	if err := s.DB.WithContext(ctx).Where("id = ? AND task_id = ?", commentID, taskID).First(&comment).Error; err != nil {
+		return fmt.Errorf("comment not found")
+	}
+
+	if comment.UserID != userID {
+		return fmt.Errorf("permission denied")
+	}
+
+	if err := s.DB.WithContext(ctx).Delete(&comment).Error; err != nil {
+		return err
+	}
+
+	s.logTaskChange(ctx, taskID, "comment_deleted", comment.Text, "")
+	s.invalidateCache(ctx, "tasks:*")
+	event := struct {
+		TaskID    string    `json:"task_id"`
+		Action    string    `json:"action"`
+		CommentID string    `json:"comment_id"`
+		CreatedAt time.Time `json:"created_at"`
+	}{TaskID: taskID.String(), Action: "comment_deleted", CommentID: commentID.String(), CreatedAt: time.Now()}
+	eventJSON, _ := json.Marshal(event)
+	s.Redis.Publish(ctx, "task_updates", eventJSON)
+
 	return nil
 }
