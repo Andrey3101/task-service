@@ -664,3 +664,130 @@ func (s *TaskService) DeleteComment(ctx context.Context, taskID, commentID uuid.
 
 	return nil
 }
+
+// CreateFinancialEvent создает новое финансовое событие
+func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, event *FinancialEvent) (*FinancialEvent, error) {
+	event.EventID = uuid.New()
+	event.UserID = userID
+	event.CreatedAt = time.Now()
+	if event.Status == "" {
+		event.Status = "pending"
+	}
+	if event.Category == "" {
+		event.Category = "other"
+	}
+
+	if err := s.DB.WithContext(ctx).Create(event).Error; err != nil {
+		return nil, fmt.Errorf("failed to create financial event: %v", err)
+	}
+
+	// Создание события в Google Calendar
+	if s.GoogleCalendar.Client != nil {
+		eventID, err := s.GoogleCalendar.CreateEvent(ctx, event.EventID.String(), event.Title, "", event.DueDate)
+		if err != nil {
+			log.Printf("Failed to create Google Calendar event: %v", err)
+		} else {
+			s.Redis.Set(ctx, "calendar_event:financial:"+event.EventID.String(), eventID, 0)
+		}
+	}
+
+	// Уведомление через notification-service
+	notification := map[string]interface{}{
+		"user_id":  userID,
+		"channel":  "email",
+		"message":  fmt.Sprintf("Financial event '%s' scheduled for %s", event.Title, event.DueDate.Format("2006-01-02")),
+		"priority": 5,
+	}
+	notificationJSON, _ := json.Marshal(notification)
+	s.RabbitMQ.Publish("", "notifications", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        notificationJSON,
+	})
+
+	return event, nil
+}
+
+// GetFinancialEvents возвращает список финансовых событий пользователя
+func (s *TaskService) GetFinancialEvents(ctx context.Context, userID string, startDate, endDate *time.Time) ([]FinancialEvent, error) {
+	var events []FinancialEvent
+	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
+	if startDate != nil && endDate != nil {
+		query = query.Where("due_date BETWEEN ? AND ?", *startDate, *endDate)
+	}
+	if err := query.Find(&events).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch financial events: %v", err)
+	}
+	return events, nil
+}
+
+// StartTimeTracking начинает отслеживание времени для задачи
+func (s *TaskService) StartTimeTracking(ctx context.Context, taskID uuid.UUID, userID string) (*TimeEntry, error) {
+	entry := &TimeEntry{
+		EntryID:   uuid.New(),
+		TaskID:    taskID,
+		UserID:    userID,
+		StartTime: time.Now(),
+	}
+	if err := s.DB.WithContext(ctx).Create(entry).Error; err != nil {
+		return nil, fmt.Errorf("failed to start time tracking: %v", err)
+	}
+	return entry, nil
+}
+
+// StopTimeTracking останавливает отслеживание времени
+func (s *TaskService) StopTimeTracking(ctx context.Context, entryID uuid.UUID, userID string) (*TimeEntry, error) {
+	var entry TimeEntry
+	if err := s.DB.WithContext(ctx).Where("entry_id = ? AND user_id = ?", entryID, userID).First(&entry).Error; err != nil {
+		return nil, fmt.Errorf("time entry not found: %v", err)
+	}
+	if entry.EndTime != nil {
+		return nil, fmt.Errorf("time tracking already stopped")
+	}
+	now := time.Now()
+	entry.EndTime = &now
+	entry.Duration = int64(now.Sub(entry.StartTime).Seconds())
+	if err := s.DB.WithContext(ctx).Save(&entry).Error; err != nil {
+		return nil, fmt.Errorf("failed to stop time tracking: %v", err)
+	}
+
+	// Отправка в document-service для генерации отчета (опционально)
+	reportData := map[string]interface{}{
+		"task_id":  entry.TaskID.String(),
+		"user_id":  userID,
+		"duration": entry.Duration,
+	}
+	reportJSON, _ := json.Marshal(reportData)
+	s.RabbitMQ.Publish("", "time_tracking_report", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        reportJSON,
+	})
+
+	return &entry, nil
+}
+
+// GetTimeReport возвращает отчет по времени
+func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period string) ([]TimeEntry, error) {
+	var entries []TimeEntry
+	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
+	switch period {
+	case "day":
+		query = query.Where("start_time >= ?", time.Now().Truncate(24*time.Hour))
+	case "week":
+		query = query.Where("start_time >= ?", time.Now().AddDate(0, 0, -7))
+	case "month":
+		query = query.Where("start_time >= ?", time.Now().AddDate(0, -1, 0))
+	}
+	if err := query.Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch time report: %v", err)
+	}
+	return entries, nil
+}
+
+// Новая функция в task_service.go
+func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]Comment, error) {
+	var comments []Comment
+	if err := s.DB.WithContext(ctx).Where("task_id = ?", taskID).Find(&comments).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch comments: %v", err)
+	}
+	return comments, nil
+}

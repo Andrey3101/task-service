@@ -14,6 +14,7 @@ import (
 	"github.com/andre/task-service/middleware"
 	"github.com/andre/task-service/queue"
 	"github.com/andre/task-service/services"
+	"github.com/google/uuid"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -220,6 +221,52 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
 	})
 
+	r.GET("/ws/tasks/:task_id/chat", func(c *gin.Context) {
+		taskID, _ := uuid.Parse(c.Param("task_id"))
+		userID := c.GetString("user_id")
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Printf("WebSocket upgrade failed: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		pubsub := redisClient.Subscribe(context.Background(), "task_chat:"+taskID.String())
+		defer pubsub.Close()
+		redisChan := pubsub.Channel()
+
+		comments, _ := taskService.GetTaskComments(c.Request.Context(), taskID)
+		for _, comment := range comments {
+			commentJSON, _ := json.Marshal(comment)
+			conn.WriteMessage(websocket.TextMessage, commentJSON)
+		}
+
+		go func() {
+			for {
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					log.Printf("WebSocket read error: %v", err)
+					break
+				}
+				var input struct {
+					Text string `json:"text"`
+				}
+				if err := json.Unmarshal(message, &input); err == nil {
+					comment, _ := taskService.AddComment(c.Request.Context(), taskID, userID, input.Text)
+					commentJSON, _ := json.Marshal(comment)
+					taskService.Redis.Publish(c.Request.Context(), "task_chat:"+taskID.String(), commentJSON)
+				}
+			}
+		}()
+
+		for msg := range redisChan {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+				log.Printf("WebSocket write error: %v", err)
+				break
+			}
+		}
+	})
+
 	// Эндпоинты задач
 	api := r.Group("/tasks")
 	{
@@ -286,6 +333,76 @@ func main() {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "User updated"})
+	})
+
+	// Внутри группы api в main.go
+	api.POST("/financial-events", func(c *gin.Context) {
+		var event FinancialEvent
+		if err := c.ShouldBindJSON(&event); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString("user_id")
+		createdEvent, err := taskService.CreateFinancialEvent(c.Request.Context(), userID, &event)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, createdEvent)
+	})
+
+	api.GET("/financial-events", func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		var startDate, endDate *time.Time
+		if startStr := c.Query("start_date"); startStr != "" {
+			if t, err := time.Parse("2006-01-02", startStr); err == nil {
+				startDate = &t
+			}
+		}
+		if endStr := c.Query("end_date"); endStr != "" {
+			if t, err := time.Parse("2006-01-02", endStr); err == nil {
+				endDate = &t
+			}
+		}
+		events, err := taskService.GetFinancialEvents(c.Request.Context(), userID, startDate, endDate)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, events)
+	})
+
+	api.POST("/:task_id/time/start", func(c *gin.Context) {
+		taskID, _ := uuid.Parse(c.Param("task_id"))
+		userID := c.GetString("user_id")
+		entry, err := taskService.StartTimeTracking(c.Request.Context(), taskID, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, entry)
+	})
+
+	api.POST("/:task_id/time/stop", func(c *gin.Context) {
+		entryID, _ := uuid.Parse(c.Query("entry_id"))
+		userID := c.GetString("user_id")
+		entry, err := taskService.StopTimeTracking(c.Request.Context(), entryID, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, entry)
+	})
+
+	api.GET("/users/:user_id/time-report", func(c *gin.Context) {
+		userID := c.Param("user_id")
+		period := c.Query("period")
+		entries, err := taskService.GetTimeReport(c.Request.Context(), userID, period)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, entries)
 	})
 
 	r.GET("/health", func(c *gin.Context) {
