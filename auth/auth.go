@@ -26,12 +26,15 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 		}
 
 		token := parts[1]
-		resp, err := http.Get(cfg.AuthService + "/profile")
-		if err != nil || resp.StatusCode != http.StatusOK {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token validation failed"})
+		req, err := http.NewRequest("GET", cfg.AuthService+"/profile", nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 			c.Abort()
 			return
 		}
+		req.Header.Set("Authorization", authHeader)
+		client := &http.Client{}
+		resp, err := client.Do(req)
 		defer resp.Body.Close() // Добавлено закрытие тела ответа
 
 		var user struct {

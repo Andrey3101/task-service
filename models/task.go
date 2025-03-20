@@ -7,18 +7,20 @@ import (
 )
 
 type Task struct {
-	ID          uuid.UUID  `json:"task_id" gorm:"type:uuid;primaryKey;column:task_id"`
+	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primaryKey"`
 	Title       string     `json:"title" gorm:"not null"`
 	Description string     `json:"description"`
 	Status      string     `json:"status" gorm:"default:pending"`
 	DueDate     time.Time  `json:"due_date"`
 	CreatedBy   string     `json:"created_by" gorm:"not null"`
 	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt time.Time  `json:"completed_at,omitempty"` // Добавлено для GetTaskStats
 	Assignees   []Assignee `json:"assignees" gorm:"many2many:task_assignees"`
 	Comments    []Comment  `json:"comments" gorm:"foreignKey:TaskID"`
-	AssigneeIDs []string   `gorm:"type:text[]" json:"assignee_ids,omitempty"`
 	Priority    int        `json:"priority" gorm:"type:integer"`
 	Cost        float64    `json:"cost"`
+	Stage       string     `json:"stage" gorm:"default:lead"`
+	Channel     string     `json:"channel"`
 }
 
 type FinancialEvent struct {
@@ -33,14 +35,50 @@ type FinancialEvent struct {
 }
 
 type TimeEntry struct {
-	EntryID   uuid.UUID  `json:"entry_id" gorm:"type:uuid;primaryKey"`
-	TaskID    uuid.UUID  `json:"task_id" gorm:"not null"`
-	UserID    string     `json:"user_id" gorm:"not null"`
-	StartTime time.Time  `json:"start_time" gorm:"not null"`
-	EndTime   *time.Time `json:"end_time"`
-	Duration  int64      `json:"duration" gorm:"default:0"` // В секундах
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primaryKey"`
+	UserID    string    `json:"user_id" gorm:"not null"`
+	TaskID    uuid.UUID `json:"task_id" gorm:"type:uuid"`
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time,omitempty"`
+	Duration  int       `json:"duration"` // В минутах
 }
 
 type Assignee struct {
 	UserID string `json:"user_id" gorm:"primaryKey"`
+}
+
+type Client struct {
+	ClientID  uuid.UUID `gorm:"type:uuid;primaryKey"`
+	CompanyID uuid.UUID `gorm:"type:uuid"`
+	Name      string    `gorm:"not null"`
+	Phone     string
+	Email     string
+}
+
+type Payroll struct {
+	ID         uuid.UUID `json:"id" gorm:"type:uuid;primaryKey"`
+	UserID     string    `json:"user_id" gorm:"not null"`
+	Period     string    `json:"period"`
+	Hours      int       `json:"hours"`
+	Rate       float64   `json:"rate"`
+	TaxRate    float64   `json:"tax_rate"`
+	NetSalary  float64   `json:"net_salary"`
+	Calculated time.Time `json:"calculated_at"`
+}
+
+type OnboardingChecklist struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primaryKey"`
+	UserID    string    `json:"user_id" gorm:"not null"`
+	TaskTitle string    `json:"task_title"`
+	Completed bool      `json:"completed"`
+	DueDate   time.Time `json:"due_date"`
+}
+
+type LeaveRequest struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;primaryKey"`
+	UserID    string    `json:"user_id" gorm:"not null"`
+	Type      string    `json:"type"` // "vacation" или "sick"
+	StartDate time.Time `json:"start_date"`
+	EndDate   time.Time `json:"end_date"`
+	Status    string    `json:"status" gorm:"default:pending"`
 }

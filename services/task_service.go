@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andre/task-service/config"
 	"github.com/andre/task-service/models"
 
 	"github.com/go-redis/redis/v8"
@@ -22,6 +21,8 @@ type TaskService struct {
 	Redis          *redis.Client
 	RabbitMQ       *amqp.Channel
 	GoogleCalendar *GoogleCalendarService
+	RabbitMQConn   *amqp.Connection
+	RabbitMQChan   *amqp.Channel
 }
 
 type TaskHistory struct {
@@ -58,24 +59,98 @@ type Suggestion struct {
 	Action map[string]interface{} `json:"action"`
 }
 
-func NewTaskService(db *gorm.DB, redis *redis.Client, rabbitMQ *amqp.Channel, cfg config.Config) *TaskService {
-	return &TaskService{
-		DB:             db,
-		Redis:          redis,
-		RabbitMQ:       rabbitMQ,
-		GoogleCalendar: NewGoogleCalendarService(cfg, redis),
+type SalesAnalytics struct {
+	TotalTasks     int            `json:"total_tasks"`
+	CompletedTasks int            `json:"completed_tasks"`
+	ConversionRate float64        `json:"conversion_rate"`
+	ChannelStats   map[string]int `json:"channel_stats"`
+	Funnel         map[string]int `json:"funnel"`
+}
+
+func (s *TaskService) GetSalesAnalytics(ctx context.Context, userID string, period string) (*SalesAnalytics, error) {
+	var tasks []models.Task
+	query := s.DB.Where("created_by = ?", userID)
+	if period != "" {
+		switch period {
+		case "day":
+			query = query.Where("created_at >= ?", time.Now().AddDate(0, 0, -1))
+		case "week":
+			query = query.Where("created_at >= ?", time.Now().AddDate(0, 0, -7))
+		case "month":
+			query = query.Where("created_at >= ?", time.Now().AddDate(0, -1, 0))
+		}
 	}
+	if err := query.Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+
+	total := len(tasks)
+	completed := 0
+	channelStats := make(map[string]int)
+	funnel := make(map[string]int)
+	for _, task := range tasks {
+		if task.Status == "completed" {
+			completed++
+		}
+		if task.Channel != "" {
+			channelStats[task.Channel]++
+		} else {
+			channelStats["unknown"]++
+		}
+		funnel[task.Stage]++
+	}
+
+	conversionRate := 0.0
+	if total > 0 {
+		conversionRate = float64(completed) / float64(total) * 100
+	}
+
+	return &SalesAnalytics{
+		TotalTasks:     total,
+		CompletedTasks: completed,
+		ConversionRate: conversionRate,
+		ChannelStats:   channelStats,
+		Funnel:         funnel,
+	}, nil
+}
+
+func NewTaskService(db *gorm.DB, redisClient *redis.Client, googleCalendar *GoogleCalendarService, rabbitMQURL string) (*TaskService, error) {
+	conn, err := amqp.Dial(rabbitMQURL)
+	if err != nil {
+		return nil, err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	service, err := &TaskService{
+		DB:             db,
+		Redis:          redisClient,
+		GoogleCalendar: googleCalendar,
+		RabbitMQConn:   conn,
+		RabbitMQChan:   ch,
+	}
+	if err != nil {
+		return nil, err
+	}
+	service.ConsumeRabbitMQ(context.Background())
+	return service, nil
 }
 
 func (s *TaskService) CreateTask(ctx context.Context, userID string, task *models.Task, autoAssign bool) (*models.Task, error) {
 	task.CreatedBy = userID
 	task.CreatedAt = time.Now()
 	if task.Priority == 0 {
-		task.Priority = 1 // Минимальный приоритет по умолчанию
+		task.Priority = 1
 	}
 
-	if autoAssign && len(task.AssigneeIDs) == 0 {
-		// Логика автоматического распределения может быть добавлена здесь, если требуется
+	// Валидация AssigneeIDs
+	for _, assigneeID := range task.AssigneeIDs {
+		var count int64
+		if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", assigneeID).Count(&count).Error; err != nil || count == 0 {
+			return nil, fmt.Errorf("assignee with ID %s not found", assigneeID)
+		}
 	}
 
 	tx := s.DB.WithContext(ctx).Begin()
@@ -87,23 +162,38 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 		tx.Rollback()
 		return nil, err
 	}
-	if err := tx.Table("tasks").Create(task).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to create task: %v", err)
-	}
 	tx.Commit()
 
-	s.logTaskChange(ctx, task.ID, "created", "", task.Title)
-	for _, assignee := range task.Assignees {
-		s.logTaskChange(ctx, task.ID, "assignee", "", assignee.UserID)
-	}
-
-	if s.GoogleCalendar.Client != nil {
-		eventID, err := s.GoogleCalendar.CreateEvent(ctx, task.ID.String(), task.Title, task.Description, task.DueDate)
+	// Отправка в RabbitMQ для генерации коммерческого предложения, если задача — follow-up
+	if strings.ToLower(task.Description) == "follow-up" || strings.Contains(strings.ToLower(task.Title), "follow-up") {
+		action := map[string]interface{}{
+			"type": "generate_proposal",
+			"data": map[string]interface{}{
+				"template_id": "proposal_v1",
+				"client_data": map[string]interface{}{
+					"name":        "Клиент из задачи " + task.Title, // Можно уточнить через ClientID
+					"amount":      10000,                            // Пример, можно динамически
+					"description": task.Description,
+				},
+				"user_id": userID,
+				"task_id": task.ID.String(),
+			},
+		}
+		actionJSON, _ := json.Marshal(action)
+		err := s.RabbitMQChan.Publish(
+			"",               // exchange
+			"document_queue", // routing key
+			false,            // mandatory
+			false,            // immediate
+			amqp.Publishing{
+				ContentType: "application/json",
+				Body:        actionJSON,
+			},
+		)
 		if err != nil {
-			log.Printf("Failed to create Google Calendar event: %v", err)
+			log.Printf("Ошибка отправки в RabbitMQ: %v", err)
 		} else {
-			log.Printf("Created Google Calendar event %s for task %s", eventID, task.ID)
+			log.Printf("Отправлено в RabbitMQ для генерации предложения для задачи %s", task.ID)
 		}
 	}
 
@@ -298,13 +388,6 @@ func (s *TaskService) AddAssignee(ctx context.Context, taskID uuid.UUID, userID 
 	s.logTaskChange(ctx, taskID, "assignee", "", userID)
 	s.invalidateCache(ctx, "tasks:*")
 	return nil
-}
-
-func (s *TaskService) invalidateCache(ctx context.Context, pattern string) {
-	keys, _ := s.Redis.Keys(ctx, pattern).Result()
-	for _, key := range keys {
-		s.Redis.Del(ctx, key)
-	}
 }
 
 func dueDateString(dueDate *time.Time) string {
@@ -540,12 +623,27 @@ func (s *TaskService) GetDashboard(ctx context.Context, userID string, filters m
 	}, nil
 }
 
-func (s *TaskService) GetMyTasks(ctx context.Context, userID string) ([]models.Task, error) {
-	var tasks []models.Task
-	if err := s.DB.WithContext(ctx).Preload("Assignees").Preload("Comments").Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)", userID).Find(&tasks).Error; err != nil {
-		return nil, err
+func (s *TaskService) GetMyTasks(ctx context.Context, userID string, limit, offset int, search string) ([]models.Task, int, error) {
+	query := s.DB.WithContext(ctx).
+		Preload("Assignees").
+		Preload("Comments").
+		Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)", userID)
+
+	if search != "" {
+		query = query.Where("title ILIKE ? OR description ILIKE ?", "%"+search+"%", "%"+search+"%")
 	}
-	return tasks, nil
+
+	var total int64
+	if err := query.Model(&models.Task{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var tasks []models.Task
+	if err := query.Limit(limit).Offset(offset).Find(&tasks).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return tasks, int(total), nil
 }
 
 func (s *TaskService) GetTaskSuggestions(ctx context.Context, userID, text string) ([]Suggestion, error) {
@@ -721,53 +819,98 @@ func (s *TaskService) GetFinancialEvents(ctx context.Context, userID string, sta
 }
 
 // StartTimeTracking начинает отслеживание времени для задачи
-func (s *TaskService) StartTimeTracking(ctx context.Context, taskID uuid.UUID, userID string) (*TimeEntry, error) {
-	entry := &TimeEntry{
-		EntryID:   uuid.New(),
-		TaskID:    taskID,
+func (s *TaskService) StartTimeTracking(ctx context.Context, userID, taskID string) (*models.TimeEntry, error) {
+	taskUUID, err := uuid.Parse(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task ID: %v", err)
+	}
+	var activeEntry models.TimeEntry
+	if err := s.DB.WithContext(ctx).Where("user_id = ? AND task_id = ? AND end_time IS NULL", userID, taskUUID).First(&activeEntry).Error; err == nil {
+		return nil, fmt.Errorf("active time tracking already exists for task %s", taskID)
+	}
+	entry := &models.TimeEntry{
+		ID:        uuid.New(),
 		UserID:    userID,
+		TaskID:    taskUUID,
 		StartTime: time.Now(),
 	}
 	if err := s.DB.WithContext(ctx).Create(entry).Error; err != nil {
-		return nil, fmt.Errorf("failed to start time tracking: %v", err)
+		return nil, err
 	}
+	// Инвалидируем кэш отчета по времени
+	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", userID))
 	return entry, nil
 }
 
 // StopTimeTracking останавливает отслеживание времени
-func (s *TaskService) StopTimeTracking(ctx context.Context, entryID uuid.UUID, userID string) (*TimeEntry, error) {
-	var entry TimeEntry
-	if err := s.DB.WithContext(ctx).Where("entry_id = ? AND user_id = ?", entryID, userID).First(&entry).Error; err != nil {
+func (s *TaskService) StopTimeTracking(ctx context.Context, entryID string) (*models.TimeEntry, error) {
+	entryUUID, err := uuid.Parse(entryID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid entry ID: %v", err)
+	}
+	var entry models.TimeEntry
+	if err := s.DB.WithContext(ctx).Where("id = ?", entryUUID).First(&entry).Error; err != nil {
 		return nil, fmt.Errorf("time entry not found: %v", err)
 	}
-	if entry.EndTime != nil {
+	if !entry.EndTime.IsZero() {
 		return nil, fmt.Errorf("time tracking already stopped")
 	}
-	now := time.Now()
-	entry.EndTime = &now
-	entry.Duration = int64(now.Sub(entry.StartTime).Seconds())
+	entry.EndTime = time.Now()
+	entry.Duration = int(entry.EndTime.Sub(entry.StartTime).Minutes())
 	if err := s.DB.WithContext(ctx).Save(&entry).Error; err != nil {
-		return nil, fmt.Errorf("failed to stop time tracking: %v", err)
+		return nil, err
 	}
-
-	// Отправка в document-service для генерации отчета (опционально)
-	reportData := map[string]interface{}{
-		"task_id":  entry.TaskID.String(),
-		"user_id":  userID,
-		"duration": entry.Duration,
-	}
-	reportJSON, _ := json.Marshal(reportData)
-	s.RabbitMQ.Publish("", "time_tracking_report", false, false, amqp.Publishing{
-		ContentType: "application/json",
-		Body:        reportJSON,
-	})
-
+	// Инвалидируем кэш отчета по времени
+	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", entry.UserID))
 	return &entry, nil
 }
 
-// GetTimeReport возвращает отчет по времени
-func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period string) ([]TimeEntry, error) {
-	var entries []TimeEntry
+// invalidateCache инвалидирует кэш по заданному шаблону
+func (s *TaskService) invalidateCache(ctx context.Context, pattern string) {
+	keys, err := s.Redis.Keys(ctx, pattern).Result()
+	if err != nil {
+		log.Printf("Ошибка получения ключей из Redis: %v", err)
+		return
+	}
+	for _, key := range keys {
+		s.Redis.Del(ctx, key)
+		log.Printf("Кэш инвалидирован для %s", key)
+	}
+}
+
+// StopTimeTracking останавливает отслеживание времени
+func (s *TaskService) StopTimeTracking(ctx context.Context, entryID string) (*models.TimeEntry, error) {
+	entryUUID, err := uuid.Parse(entryID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid entry ID: %v", err)
+	}
+	var entry models.TimeEntry
+	if err := s.DB.WithContext(ctx).Where("id = ?", entryUUID).First(&entry).Error; err != nil {
+		return nil, fmt.Errorf("time entry not found: %v", err)
+	}
+	if !entry.EndTime.IsZero() {
+		return nil, fmt.Errorf("time tracking already stopped")
+	}
+	entry.EndTime = time.Now()
+	entry.Duration = int(entry.EndTime.Sub(entry.StartTime).Minutes())
+	if err := s.DB.WithContext(ctx).Save(&entry).Error; err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// GetTimeReport возвращает отчет по времени с кэшированием
+func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period string) ([]models.TimeEntry, error) {
+	cacheKey := fmt.Sprintf("time_report:%s:%s", userID, period)
+	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
+		var entries []models.TimeEntry
+		if err := json.Unmarshal(cached, &entries); err == nil {
+			log.Printf("GetTimeReport: данные получены из кэша для %s", cacheKey)
+			return entries, nil
+		}
+	}
+
+	var entries []models.TimeEntry
 	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
 	switch period {
 	case "day":
@@ -776,11 +919,107 @@ func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period s
 		query = query.Where("start_time >= ?", time.Now().AddDate(0, 0, -7))
 	case "month":
 		query = query.Where("start_time >= ?", time.Now().AddDate(0, -1, 0))
+	default:
+		// Если period не указан, возвращаем все записи
 	}
 	if err := query.Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch time report: %v", err)
 	}
+
+	// Сохраняем в кэш с TTL 10 минут
+	if data, err := json.Marshal(entries); err == nil {
+		s.Redis.Set(ctx, cacheKey, data, 10*time.Minute)
+		log.Printf("GetTimeReport: данные сохранены в кэш для %s", cacheKey)
+	}
+
 	return entries, nil
+}
+
+func (s *TaskService) CreateOnboardingChecklist(ctx context.Context, userID string) error {
+	checklist := []models.OnboardingChecklist{
+		{ID: uuid.New(), UserID: userID, TaskTitle: "Заполнить профиль", DueDate: time.Now().Add(24 * time.Hour)},
+		{ID: uuid.New(), UserID: userID, TaskTitle: "Пройти обучение", DueDate: time.Now().Add(48 * time.Hour)},
+	}
+	if err := s.DB.Create(&checklist).Error; err != nil {
+		return err
+	}
+
+	// Отправка уведомления через RabbitMQ
+	for _, item := range checklist {
+		notification := map[string]interface{}{
+			"type": "notify_user",
+			"data": map[string]interface{}{
+				"user_id":  userID,
+				"message":  fmt.Sprintf("Завершите задачу: %s к %s", item.TaskTitle, item.DueDate),
+				"priority": 5,
+			},
+		}
+		notificationJSON, _ := json.Marshal(notification)
+		s.RabbitMQChan.Publish("", "notifications_queue", false, false, amqp.Publishing{
+			ContentType: "application/json",
+			Body:        notificationJSON,
+		})
+	}
+	return nil
+}
+
+// CalculatePayroll рассчитывает зарплату с кэшированием
+func (s *TaskService) CalculatePayroll(ctx context.Context, userID, period string) (*models.Payroll, error) {
+	cacheKey := fmt.Sprintf("payroll:%s:%s", userID, period)
+	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
+		var payroll models.Payroll
+		if err := json.Unmarshal(cached, &payroll); err == nil {
+			log.Printf("CalculatePayroll: данные получены из кэша для %s", cacheKey)
+			return &payroll, nil
+		}
+	}
+
+	var totalHours int
+	type User struct {
+		Rate    float64 `gorm:"column:rate"`
+		TaxRate float64 `gorm:"column:tax_rate"`
+	}
+	var user User
+	if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", userID).First(&user).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
+	entries := []models.TimeEntry{}
+	if err := s.DB.WithContext(ctx).Where("user_id = ? AND start_time LIKE ?", userID, period+"%").Find(&entries).Error; err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		totalHours += entry.Duration / 60 // Переводим минуты в часы
+	}
+
+	grossSalary := float64(totalHours) * user.Rate
+	tax := grossSalary * user.TaxRate
+	netSalary := grossSalary - tax
+
+	payroll := &models.Payroll{
+		ID:         uuid.New(),
+		UserID:     userID,
+		Period:     period,
+		Hours:      totalHours,
+		Rate:       user.Rate,
+		TaxRate:    user.TaxRate,
+		NetSalary:  netSalary,
+		Calculated: time.Now(),
+	}
+	if err := s.DB.WithContext(ctx).Create(payroll).Error; err != nil {
+		return nil, err
+	}
+
+	// Сохраняем в кэш с TTL 1 час
+	if data, err := json.Marshal(payroll); err == nil {
+		s.Redis.Set(ctx, cacheKey, data, 1*time.Hour)
+		log.Printf("CalculatePayroll: данные сохранены в кэш для %s", cacheKey)
+	}
+
+	// Инвалидируем кэш отчета по времени
+	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", userID))
+
+	return payroll, nil
 }
 
 // Новая функция в task_service.go
@@ -790,4 +1029,122 @@ func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]
 		return nil, fmt.Errorf("failed to fetch comments: %v", err)
 	}
 	return comments, nil
+}
+
+func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType string, startDate, endDate time.Time) (*models.LeaveRequest, error) {
+	request := &models.LeaveRequest{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Type:      leaveType,
+		StartDate: startDate,
+		EndDate:   endDate,
+	}
+	if err := s.DB.Create(request).Error; err != nil {
+		return nil, err
+	}
+
+	if s.GoogleCalendar.Client != nil {
+		eventID, err := s.GoogleCalendar.CreateEvent(ctx, request.ID.String(), fmt.Sprintf("%s: %s", leaveType, userID), "", startDate)
+		if err != nil {
+			log.Printf("Ошибка создания события в Google Calendar: %v", err)
+		}
+	}
+
+	// Уведомление через RabbitMQ
+	notification := map[string]interface{}{
+		"type": "notify_user",
+		"data": map[string]interface{}{
+			"user_id":  userID,
+			"message":  fmt.Sprintf("Запрос на %s с %s по %s создан", leaveType, startDate, endDate),
+			"priority": 5,
+		},
+	}
+	notificationJSON, _ := json.Marshal(notification)
+	s.RabbitMQChan.Publish("", "notifications_queue", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        notificationJSON,
+	})
+	return request, nil
+}
+
+func (s *TaskService) Close() {
+	s.RabbitMQChan.Close()
+	s.RabbitMQConn.Close()
+}
+
+// ConsumeRabbitMQ обрабатывает сообщения из очереди
+func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
+	queue, err := s.RabbitMQChan.QueueDeclare("task_queue", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка объявления очереди: %v", err)
+	}
+	msgs, err := s.RabbitMQChan.Consume(queue.Name, "", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка потребления очереди: %v", err)
+	}
+
+	go func() {
+		for msg := range msgs {
+			var action map[string]interface{}
+			if err := json.Unmarshal(msg.Body, &action); err != nil {
+				log.Printf("Ошибка разбора сообщения: %v", err)
+				continue
+			}
+			actionType, ok := action["type"].(string)
+			if !ok {
+				log.Printf("Ошибка: тип действия не указан")
+				continue
+			}
+			data, ok := action["data"].(map[string]interface{})
+			if !ok {
+				log.Printf("Ошибка: данные действия не валидны")
+				continue
+			}
+
+			switch actionType {
+			case "start_time_tracking":
+				userID := data["user_id"].(string)
+				taskID := data["task_id"].(string)
+				if _, err := s.StartTimeTracking(ctx, userID, taskID); err != nil {
+					log.Printf("Ошибка старта трекинга: %v", err)
+				}
+			case "stop_time_tracking":
+				entryID := data["entry_id"].(string)
+				if _, err := s.StopTimeTracking(ctx, entryID); err != nil {
+					log.Printf("Ошибка остановки трекинга: %v", err)
+				}
+			case "calculate_payroll":
+				userID := data["user_id"].(string)
+				period := data["period"].(string)
+				if _, err := s.CalculatePayroll(ctx, userID, period); err != nil {
+					log.Printf("Ошибка расчета зарплаты: %v", err)
+				}
+			case "create_onboarding":
+				userID := data["user_id"].(string)
+				if err := s.CreateOnboardingChecklist(ctx, userID); err != nil {
+					log.Printf("Ошибка создания онбординга: %v", err)
+				}
+			case "create_leave_request":
+				userID := data["user_id"].(string)
+				leaveType := data["leave_type"].(string)
+				startDateStr, _ := data["start_date"].(string)
+				endDateStr, _ := data["end_date"].(string)
+				startDate, err := time.Parse(time.RFC3339, startDateStr)
+				if err != nil {
+					log.Printf("Ошибка парсинга start_date: %v", err)
+					continue
+				}
+				endDate, err := time.Parse(time.RFC3339, endDateStr)
+				if err != nil {
+					log.Printf("Ошибка парсинга end_date: %v", err)
+					continue
+				}
+				if _, err := s.CreateLeaveRequest(ctx, userID, leaveType, startDate, endDate); err != nil {
+					log.Printf("Ошибка создания запроса на отпуск: %v", err)
+				}
+			default:
+				log.Printf("Неизвестный тип действия: %s", actionType)
+			}
+		}
+	}()
 }

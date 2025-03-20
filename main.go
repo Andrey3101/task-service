@@ -122,17 +122,14 @@ func main() {
 		for msg := range redisChan {
 			var taskEvent struct {
 				TaskID    string    `json:"task_id"`
-				Action    string    `json:"action,omitempty"`
-				CreatedAt time.Time `json:"created_at,omitempty"`
+				Action    string    `json:"action"`
+				CreatedAt time.Time `json:"created_at"`
 			}
 			if err := json.Unmarshal([]byte(msg.Payload), &taskEvent); err != nil {
 				continue
 			}
-			if partitionFilter != "" {
-				partition := taskEvent.CreatedAt.Format("2006-01")
-				if partition != partitionFilter {
-					continue
-				}
+			if partitionFilter != "" && taskEvent.CreatedAt.Format("2006-01") != partitionFilter {
+				continue
 			}
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
 				log.Printf("WebSocket write error: %v", err)
@@ -287,6 +284,16 @@ func main() {
 		api.PUT("/:id/comments/:comment_id", taskHandler.UpdateComment)
 		api.DELETE("/:id/comments/:comment_id", taskHandler.DeleteComment)
 		api.GET("/task", taskHandler.GetTaskStats)
+		api.POST("/follow-up", taskHandler.CreateFollowUpTask)
+		api.GET("/sales/analytics", taskHandler.GetSalesAnalytics)
+
+		// Новые эндпоинты с валидацией
+		api.POST("/:id/time/start", taskHandler.StartTimeTracking)
+		api.POST("/time/stop", taskHandler.StopTimeTracking)
+		api.GET("/users/:user_id/time-report", taskHandler.GetTimeReport)
+		api.POST("/payroll/calculate", taskHandler.CalculatePayroll)
+		api.POST("/onboarding", taskHandler.CreateOnboardingChecklist)
+		api.POST("/leave/request", taskHandler.CreateLeaveRequest)
 	}
 
 	// Эндпоинты управления пользователями

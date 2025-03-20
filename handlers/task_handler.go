@@ -428,12 +428,16 @@ func (h *TaskHandler) GetDashboard(c *gin.Context) {
 // @Router /tasks/my [get]
 func (h *TaskHandler) GetMyTasks(c *gin.Context) {
 	userID := c.GetString("user_id")
-	tasks, err := h.Service.GetMyTasks(c.Request.Context(), userID)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	search := c.Query("search")
+
+	tasks, total, err := h.service.GetMyTasks(c.Request.Context(), userID, limit, offset, search)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": total})
 }
 
 // GetTaskSuggestions godoc
@@ -596,4 +600,242 @@ func (h *TaskHandler) DeleteComment(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Comment deleted"})
+}
+
+func (h *TaskHandler) CreateFollowUpTask(c *gin.Context) {
+	var input struct {
+		ClientID     string `json:"client_id" binding:"required"`
+		FollowUpDate string `json:"follow_up_date" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+	dueDate, err := time.Parse("2006-01-02", input.FollowUpDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format"})
+		return
+	}
+	userID := c.GetString("user_id")
+	task := models.Task{
+		ID:          uuid.New(),
+		Title:       "Follow-up с клиентом " + input.ClientID,
+		Description: "Связаться с клиентом для продолжения продаж",
+		Status:      "pending",
+		DueDate:     dueDate,
+		CreatedBy:   userID,
+		CreatedAt:   time.Now(),
+	}
+	createdTask, err := h.Service.CreateTask(c.Request.Context(), userID, &task, true)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusCreated, createdTask)
+}
+
+func (h *TaskHandler) GetSalesAnalytics(c *gin.Context) {
+	userID := c.GetString("user_id")
+	period := c.Query("period")
+	analytics, err := h.Service.GetSalesAnalytics(c.Request.Context(), userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, analytics)
+}
+
+// StartTimeTracking godoc
+// @Summary Start time tracking for a task
+// @Description Start tracking time for a specific task
+// @Tags time_tracking
+// @Produce json
+// @Param task_id path string true "Task ID"
+// @Success 200 {object} models.TimeEntry
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/{task_id}/time/start [post]
+func (h *TaskHandler) StartTimeTracking(c *gin.Context) {
+	userID := c.GetString("user_id")
+	role := c.GetString("role")
+	if role == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+	entry, err := h.Service.StartTimeTracking(c.Request.Context(), userID, taskID.String())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, entry)
+}
+
+// StopTimeTracking godoc
+// @Summary Stop time tracking
+// @Description Stop tracking time for a specific entry
+// @Tags time_tracking
+// @Produce json
+// @Param entry_id query string true "Time Entry ID"
+// @Success 200 {object} models.TimeEntry
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/time/stop [post]
+func (h *TaskHandler) StopTimeTracking(c *gin.Context) {
+	userID := c.GetString("user_id")
+	role := c.GetString("role")
+	if role == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	entryID, err := uuid.Parse(c.Query("entry_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+	entry, err := h.Service.StopTimeTracking(c.Request.Context(), entryID.String())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, entry)
+}
+
+// GetTimeReport godoc
+// @Summary Get time report for a user
+// @Description Retrieve time tracking report for a user
+// @Tags time_tracking
+// @Produce json
+// @Param user_id path string true "User ID"
+// @Param period query string false "Period (day, week, month)"
+// @Success 200 {array} models.TimeEntry
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/users/{user_id}/time-report [get]
+func (h *TaskHandler) GetTimeReport(c *gin.Context) {
+	role := c.GetString("role")
+	if role != "manager" && role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	userID := c.Param("user_id")
+	period := c.Query("period")
+	entries, err := h.Service.GetTimeReport(c.Request.Context(), userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
+}
+
+// CalculatePayroll godoc
+// @Summary Calculate payroll for a user
+// @Description Calculate payroll based on tracked time
+// @Tags payroll
+// @Produce json
+// @Param period query string true "Period (e.g., 2025-03)"
+// @Success 200 {object} models.Payroll
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/payroll/calculate [post]
+func (h *TaskHandler) CalculatePayroll(c *gin.Context) {
+	role := c.GetString("role")
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	period := c.Query("period")
+	if period == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": period is required"})
+		return
+	}
+	payroll, err := h.Service.CalculatePayroll(c.Request.Context(), userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, payroll)
+}
+
+// CreateOnboardingChecklist godoc
+// @Summary Create onboarding checklist for a user
+// @Description Generate onboarding tasks for a new user
+// @Tags onboarding
+// @Produce json
+// @Success 200 {object} map[string]string "message response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/onboarding [post]
+func (h *TaskHandler) CreateOnboardingChecklist(c *gin.Context) {
+	role := c.GetString("role")
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	if err := h.Service.CreateOnboardingChecklist(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Onboarding checklist created"})
+}
+
+// CreateLeaveRequest godoc
+// @Summary Create a leave request
+// @Description Submit a vacation or sick leave request
+// @Tags leave
+// @Accept json
+// @Produce json
+// @Param request body object true "Leave request data" {"type": "string", "start_date": "string", "end_date": "string"}
+// @Success 200 {object} models.LeaveRequest
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/leave/request [post]
+func (h *TaskHandler) CreateLeaveRequest(c *gin.Context) {
+	userID := c.GetString("user_id")
+	role := c.GetString("role")
+	if role == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	var input struct {
+		Type      string `json:"type" binding:"required,oneof=vacation sick"`
+		StartDate string `json:"start_date" binding:"required"`
+		EndDate   string `json:"end_date" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
+		return
+	}
+	startDate, err := time.Parse("2006-01-02", input.StartDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid start_date"})
+		return
+	}
+	endDate, err := time.Parse("2006-01-02", input.EndDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid end_date"})
+		return
+	}
+	request, err := h.Service.CreateLeaveRequest(c.Request.Context(), userID, input.Type, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, request)
 }
