@@ -24,6 +24,11 @@ type TaskService struct {
 	RabbitMQChan   *amqp.Channel
 }
 
+type Recurrence struct {
+	Interval string    `json:"interval"` // "daily", "weekly", "monthly"
+	Until    time.Time `json:"until"`    // До какого времени повторять
+}
+
 type TaskHistory struct {
 	HistoryID uuid.UUID `json:"history_id" gorm:"type:uuid;primaryKey"`
 	TaskID    uuid.UUID `json:"task_id" gorm:"not null"`
@@ -211,6 +216,124 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 	eventJSON, _ := json.Marshal(event)
 	s.Redis.Publish(ctx, "task_updates", eventJSON)
 	return task, nil
+}
+
+// CreateRecurringTask создаёт задачу с повторением
+func (s *TaskService) CreateRecurringTask(ctx context.Context, userID string, task *models.Task, recurrence *Recurrence) (*models.Task, error) {
+	task, err := s.CreateTask(ctx, userID, task, true)
+	if err != nil {
+		return nil, err
+	}
+
+	if recurrence != nil {
+		job := map[string]interface{}{
+			"type":        "create_recurring_task",
+			"task_id":     task.ID.String(),
+			"user_id":     userID,
+			"interval":    recurrence.Interval,
+			"until":       recurrence.Until.Format(time.RFC3339),
+			"title":       task.Title,
+			"description": task.Description,
+			"priority":    task.Priority,
+		}
+		jobJSON, _ := json.Marshal(job)
+		if err := s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
+			ContentType: "application/json",
+			Body:        jobJSON,
+		}); err != nil {
+			log.Printf("Ошибка отправки в очередь recurring_tasks: %v", err)
+		}
+	}
+	return task, nil
+}
+
+// GetProductivityReport возвращает отчёт о продуктивности за период
+func (s *TaskService) GetProductivityReport(ctx context.Context, userID, period string) (map[string]interface{}, error) {
+	cacheKey := fmt.Sprintf("productivity:%s:%s", userID, period)
+	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
+		var report map[string]interface{}
+		if err := json.Unmarshal(cached, &report); err == nil {
+			log.Printf("GetProductivityReport: данные из кэша для %s", cacheKey)
+			return report, nil
+		}
+	}
+
+	var entries []models.TimeEntry
+	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
+	switch period {
+	case "day":
+		query = query.Where("start_time >= ?", time.Now().Truncate(24*time.Hour))
+	case "week":
+		query = query.Where("start_time >= ?", time.Now().AddDate(0, 0, -7))
+	case "month":
+		query = query.Where("start_time >= ?", time.Now().AddDate(0, -1, 0))
+	default:
+		return nil, fmt.Errorf("invalid period: %s", period)
+	}
+	if err := query.Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch time entries: %v", err)
+	}
+
+	totalMinutes := 0
+	taskTimes := make(map[string]int)
+	for _, entry := range entries {
+		duration := entry.Duration
+		if entry.EndTime.IsZero() {
+			duration = int(time.Now().Sub(entry.StartTime).Minutes())
+		}
+		totalMinutes += duration
+		taskTimes[entry.TaskID.String()] += duration
+	}
+
+	report := map[string]interface{}{
+		"total_minutes": totalMinutes,
+		"task_times":    taskTimes,
+	}
+	if data, err := json.Marshal(report); err == nil {
+		s.Redis.Set(ctx, cacheKey, data, 10*time.Minute)
+		log.Printf("GetProductivityReport: данные сохранены в кэш для %s", cacheKey)
+	}
+	return report, nil
+}
+
+// CreateTaxReminders создаёт напоминания о налогах и отчётах
+func (s *TaskService) CreateTaxReminders(ctx context.Context, userID, companyType string) error {
+	taxDates := map[string][]struct {
+		Title   string
+		DueDate time.Time
+	}{
+		"self-employed": {
+			{"Подать декларацию за квартал", time.Now().AddDate(0, 3, 0)},
+			{"Оплатить налог за квартал", time.Now().AddDate(0, 3, 10)},
+		},
+		"ip": {
+			{"Оплатить НДС", time.Now().AddDate(0, 1, 0)},
+			{"Подать годовую декларацию", time.Now().AddDate(1, 0, 0)},
+		},
+	}
+
+	reminders, exists := taxDates[companyType]
+	if !exists {
+		log.Printf("Неподдерживаемый тип компании: %s для userID: %s", companyType, userID)
+		return fmt.Errorf("unsupported company type: %s", companyType)
+	}
+
+	for _, reminder := range reminders {
+		task := &models.Task{
+			ID:        uuid.New(),
+			Title:     reminder.Title,
+			CreatedBy: userID,
+			CreatedAt: time.Now(),
+			DueDate:   reminder.DueDate,
+			Status:    "pending",
+			Priority:  2, // Средний приоритет
+		}
+		if _, err := s.CreateTask(ctx, userID, task, true); err != nil {
+			log.Printf("Ошибка создания задачи напоминания о налогах: %v", err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time.Time, priority, assigneeID, fields string, limit, offset int) ([]models.Task, int, error) {
@@ -1205,11 +1328,6 @@ func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType 
 	return request, nil
 }
 
-func (s *TaskService) Close() {
-	s.RabbitMQChan.Close()
-	s.RabbitMQConn.Close()
-}
-
 // ConsumeRabbitMQ обрабатывает сообщения из очереди
 func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 	queue, err := s.RabbitMQChan.QueueDeclare("task_queue", true, false, false, false, nil)
@@ -1219,6 +1337,15 @@ func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 	msgs, err := s.RabbitMQChan.Consume(queue.Name, "", true, false, false, false, nil)
 	if err != nil {
 		log.Fatalf("Ошибка потребления очереди: %v", err)
+	}
+
+	recurringQueue, err := s.RabbitMQChan.QueueDeclare("recurring_tasks", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка объявления очереди recurring_tasks: %v", err)
+	}
+	recurringMsgs, err := s.RabbitMQChan.Consume(recurringQueue.Name, "", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка потребления очереди recurring_tasks: %v", err)
 	}
 
 	go func() {
@@ -1288,6 +1415,59 @@ func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 				}
 			default:
 				log.Printf("Неизвестный тип действия: %s", actionType)
+			}
+		}
+	}()
+	go func() {
+		for msg := range recurringMsgs {
+			var job map[string]interface{}
+			if err := json.Unmarshal(msg.Body, &job); err != nil {
+				log.Printf("Ошибка разбора сообщения recurring_tasks: %v", err)
+				continue
+			}
+			if job["type"] == "create_recurring_task" {
+				interval := job["interval"].(string)
+				until, _ := time.Parse(time.RFC3339, job["until"].(string))
+				nextDue := time.Now()
+				switch interval {
+				case "daily":
+					nextDue = nextDue.Add(24 * time.Hour)
+				case "weekly":
+					nextDue = nextDue.Add(7 * 24 * time.Hour)
+				case "monthly":
+					nextDue = nextDue.AddDate(0, 1, 0)
+				default:
+					log.Printf("Неподдерживаемый интервал: %s", interval)
+					continue
+				}
+				if nextDue.Before(until) {
+					newTask := &models.Task{
+						ID:          uuid.New(),
+						Title:       job["title"].(string),
+						Description: job["description"].(string),
+						DueDate:     nextDue,
+						CreatedBy:   job["user_id"].(string),
+						CreatedAt:   time.Now(),
+						Status:      "pending",
+						Priority:    int(job["priority"].(float64)),
+					}
+					if _, err := s.CreateTask(ctx, job["user_id"].(string), newTask, true); err != nil {
+						log.Printf("Ошибка создания повторяющейся задачи: %v", err)
+						continue
+					}
+					// Перепостановка задачи в очередь
+					s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
+						ContentType: "application/json",
+						Body:        msg.Body,
+					})
+					time.Sleep(1 * time.Second) // Задержка перед повторной отправкой
+					if err := s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
+						ContentType: "application/json",
+						Body:        msg.Body,
+					}); err != nil {
+						log.Printf("Ошибка повторной отправки в recurring_tasks: %v", err)
+					}
+				}
 			}
 		}
 	}()

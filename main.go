@@ -48,6 +48,9 @@ func main() {
 	}
 
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, PoolSize: 10})
+	if _, err := redisClient.Ping(context.Background()).Result(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
 	defer redisClient.Close()
 
 	var rabbitConn *amqp.Connection
@@ -319,6 +322,9 @@ func main() {
 		api.GET("/time/active", taskHandler.GetActiveTimeEntries)
 		api.GET("/time/total", taskHandler.GetTotalActiveTime)
 		api.GET("/payroll/aggregate", taskHandler.GetAggregatePayroll)
+		api.POST("/recurring", taskHandler.CreateRecurringTask)
+		api.GET("/productivity", taskHandler.GetProductivityReport)
+		api.POST("/tax-reminders", taskHandler.CreateTaxReminders)
 
 		// Эндпоинты финансовых событий
 		api.POST("/financial-events", func(c *gin.Context) {

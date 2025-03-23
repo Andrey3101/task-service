@@ -878,6 +878,98 @@ func (h *TaskHandler) CreateOnboardingChecklist(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Onboarding checklist created"})
 }
 
+// CreateRecurringTask godoc
+// @Summary Create a recurring task
+// @Description Create a task that repeats on a specified interval
+// @Tags tasks
+// @Accept json
+// @Produce json
+// @Param request body object true "Task with recurrence" {"title": "string", "description": "string", "due_date": "string", "priority": "int", "recurrence": {"interval": "string", "until": "string"}}
+// @Success 201 {object} models.Task
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/recurring [post]
+func (h *TaskHandler) CreateRecurringTask(c *gin.Context) {
+	var input struct {
+		models.Task
+		Recurrence *services.Recurrence `json:"recurrence"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
+		return
+	}
+	if input.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": title is required"})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	input.ID = uuid.New()
+	input.CreatedAt = time.Now()
+	input.Status = "pending"
+
+	task, err := h.Service.CreateRecurringTask(c.Request.Context(), userID, &input.Task, input.Recurrence)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, task)
+}
+
+// GetProductivityReport godoc
+// @Summary Get productivity report
+// @Description Retrieve productivity report for a user over a period
+// @Tags time_tracking
+// @Produce json
+// @Param period query string true "Period (day, week, month)"
+// @Success 200 {object} map[string]interface{} "productivity report"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/productivity [get]
+func (h *TaskHandler) GetProductivityReport(c *gin.Context) {
+	userID := c.GetString("user_id")
+	period := c.Query("period")
+	if period != "day" && period != "week" && period != "month" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": period must be day, week, or month"})
+		return
+	}
+
+	report, err := h.Service.GetProductivityReport(c.Request.Context(), userID, period)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, report)
+}
+
+// CreateTaxReminders godoc
+// @Summary Create tax reminders
+// @Description Generate tax and report reminders based on company type
+// @Tags taxes
+// @Accept json
+// @Produce json
+// @Param request body object true "Company type" {"company_type": "string"}
+// @Success 200 {object} map[string]string "message response"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/tax-reminders [post]
+func (h *TaskHandler) CreateTaxReminders(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var input struct {
+		CompanyType string `json:"company_type" binding:"required,oneof=self-employed ip"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
+		return
+	}
+
+	if err := h.Service.CreateTaxReminders(c.Request.Context(), userID, input.CompanyType); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Tax reminders created"})
+}
+
 // CreateLeaveRequest godoc
 // @Summary Create a leave request
 // @Description Submit a vacation or sick leave request
