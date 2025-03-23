@@ -275,6 +275,17 @@ func (h *TaskHandler) DeleteTask(c *gin.Context) {
 	}
 
 	userID := c.GetString("user_id")
+	role := c.GetString("role")
+	task, err := h.Service.GetTask(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
+		return
+	}
+	if role != "admin" && role != "super_admin" && task.CreatedBy != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
 	if err := h.Service.DeleteTask(c.Request.Context(), id, userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
@@ -432,7 +443,7 @@ func (h *TaskHandler) GetMyTasks(c *gin.Context) {
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	search := c.Query("search")
 
-	tasks, total, err := h.service.GetMyTasks(c.Request.Context(), userID, limit, offset, search)
+	tasks, total, err := h.Service.GetMyTasks(c.Request.Context(), userID, limit, offset, search)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -664,14 +675,14 @@ func (h *TaskHandler) StartTimeTracking(c *gin.Context) {
 		return
 	}
 
-	taskID, err := uuid.Parse(c.Param("id"))
+	taskID, err := uuid.Parse(c.Param("task_id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
 		return
 	}
 	entry, err := h.Service.StartTimeTracking(c.Request.Context(), userID, taskID.String())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, entry)
@@ -696,17 +707,53 @@ func (h *TaskHandler) StopTimeTracking(c *gin.Context) {
 		return
 	}
 
-	entryID, err := uuid.Parse(c.Query("entry_id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+	entryID := c.Query("entry_id")
+	if entryID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": entry_id is required"})
 		return
 	}
-	entry, err := h.Service.StopTimeTracking(c.Request.Context(), entryID.String())
+	entry, err := h.Service.StopTimeTracking(c.Request.Context(), entryID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, entry)
+}
+
+// GetActiveTimeEntries godoc
+// @Summary Get active time entries for a user
+// @Description Retrieve all active time tracking entries for the current user
+// @Tags time_tracking
+// @Produce json
+// @Success 200 {array} models.TimeEntry
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/time/active [get]
+func (h *TaskHandler) GetActiveTimeEntries(c *gin.Context) {
+	userID := c.GetString("user_id")
+	entries, err := h.Service.GetActiveTimeEntries(c.Request.Context(), userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
 	}
-	c.JSON(http.StatusOK, entry)
+	c.JSON(http.StatusOK, entries)
+}
+
+// GetTotalActiveTime godoc
+// @Summary Get total active time for a user
+// @Description Calculate total active time in minutes for the current user
+// @Tags time_tracking
+// @Produce json
+// @Success 200 {object} map[string]int "total_minutes response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/time/total [get]
+func (h *TaskHandler) GetTotalActiveTime(c *gin.Context) {
+	userID := c.GetString("user_id")
+	totalMinutes, err := h.Service.CalculateTotalActiveTime(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"total_minutes": totalMinutes})
 }
 
 // GetTimeReport godoc
@@ -767,6 +814,44 @@ func (h *TaskHandler) CalculatePayroll(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, payroll)
+}
+
+// GetAggregatePayroll godoc
+// @Summary Get aggregate payroll data
+// @Description Retrieve aggregated payroll data for all employees in the company
+// @Tags payroll
+// @Produce json
+// @Param period query string true "Period (e.g., 2025-03)"
+// @Success 200 {array} map[string]interface{} "aggregate payroll data"
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/payroll/aggregate [get]
+func (h *TaskHandler) GetAggregatePayroll(c *gin.Context) {
+	userID := c.GetString("user_id")
+	role := c.GetString("role")
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
+	period := c.Query("period")
+	if period == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": period is required"})
+		return
+	}
+
+	payrollData, err := h.Service.GetAggregatePayroll(c.Request.Context(), userID, period)
+	if err != nil {
+		if err.Error() == "only admins can access aggregate payroll data" {
+			c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, payrollData)
 }
 
 // CreateOnboardingChecklist godoc

@@ -36,26 +36,20 @@ func main() {
 	cfg := config.LoadConfig()
 	log.Printf("Connecting to RabbitMQ at: %s", cfg.RabbitMQ)
 
-	// Подключение к базе данных через database/sql
 	dbConn, err := sql.Open("pgx", cfg.DBConn)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer dbConn.Close()
 
-	// Настройка GORM с использованием database/sql
-	db, err := gorm.Open(postgres.New(postgres.Config{
-		Conn: dbConn,
-	}), &gorm.Config{})
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: dbConn}), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to initialize GORM: %v", err)
 	}
 
-	// Подключение к Redis
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, PoolSize: 10})
 	defer redisClient.Close()
 
-	// Подключение к RabbitMQ
 	var rabbitConn *amqp.Connection
 	for i := 0; i < 10; i++ {
 		rabbitConn, err = amqp.Dial(cfg.RabbitMQ)
@@ -63,7 +57,7 @@ func main() {
 			break
 		}
 		log.Printf("Failed to connect to RabbitMQ (attempt %d): %v", i+1, err)
-		time.Sleep(5 * time.Second) // Ожидание перед следующей попыткой
+		time.Sleep(5 * time.Second)
 	}
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ after retries: %v", err)
@@ -75,16 +69,18 @@ func main() {
 	}
 	defer rabbitCh.Close()
 
-	// Инициализация сервисов
 	authService := services.NewAuthService(cfg, redisClient, db)
-	taskService := services.NewTaskService(db, redisClient, rabbitCh, cfg)
+	googleCalendar := services.NewGoogleCalendarService(cfg, redisClient)
+	taskService, err := services.NewTaskService(db, redisClient, googleCalendar, cfg.RabbitMQ)
+	if err != nil {
+		log.Fatalf("Failed to initialize TaskService: %v", err)
+	}
+	defer taskService.Close()
 	taskHandler := handlers.NewTaskHandler(taskService, cfg)
 	queueService := queue.NewQueueService(cfg, taskService)
 
-	// Запуск потребителя очереди в фоновом режиме
 	go queueService.StartConsumer()
 
-	// Настройка Gin-роутера
 	r := gin.Default()
 	r.Use(middleware.AuthMiddleware(authService))
 
@@ -97,17 +93,21 @@ func main() {
 		}
 		defer conn.Close()
 
-		pubsub := redisClient.Subscribe(context.Background(), "task_updates")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		pubsub := redisClient.Subscribe(ctx, "task_updates")
 		defer pubsub.Close()
 		redisChan := pubsub.Channel()
 
 		var partitionFilter string
 		go func() {
+			defer cancel()
 			for {
 				_, message, err := conn.ReadMessage()
 				if err != nil {
 					log.Printf("WebSocket read error: %v", err)
-					break
+					return
 				}
 				var filter struct {
 					Partition string `json:"partition"`
@@ -119,21 +119,91 @@ func main() {
 			}
 		}()
 
-		for msg := range redisChan {
-			var taskEvent struct {
-				TaskID    string    `json:"task_id"`
-				Action    string    `json:"action"`
-				CreatedAt time.Time `json:"created_at"`
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-redisChan:
+				if !ok {
+					return
+				}
+				var taskEvent struct {
+					TaskID    string    `json:"task_id"`
+					Action    string    `json:"action"`
+					CreatedAt time.Time `json:"created_at"`
+				}
+				if err := json.Unmarshal([]byte(msg.Payload), &taskEvent); err != nil {
+					continue
+				}
+				if partitionFilter != "" && taskEvent.CreatedAt.Format("2006-01") != partitionFilter {
+					continue
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+					log.Printf("WebSocket write error: %v", err)
+					return
+				}
 			}
-			if err := json.Unmarshal([]byte(msg.Payload), &taskEvent); err != nil {
-				continue
-			}
-			if partitionFilter != "" && taskEvent.CreatedAt.Format("2006-01") != partitionFilter {
-				continue
-			}
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+		}
+	})
+
+	// WebSocket для чата задач
+	r.GET("/ws/tasks/:task_id/chat", func(c *gin.Context) {
+		taskID, _ := uuid.Parse(c.Param("task_id"))
+		userID := c.GetString("user_id")
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Printf("WebSocket upgrade failed: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		pubsub := redisClient.Subscribe(ctx, "task_chat:"+taskID.String())
+		defer pubsub.Close()
+		redisChan := pubsub.Channel()
+
+		comments, _ := taskService.GetTaskComments(c.Request.Context(), taskID)
+		for _, comment := range comments {
+			commentJSON, _ := json.Marshal(comment)
+			if err := conn.WriteMessage(websocket.TextMessage, commentJSON); err != nil {
 				log.Printf("WebSocket write error: %v", err)
-				break
+				return
+			}
+		}
+
+		go func() {
+			defer cancel()
+			for {
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					log.Printf("WebSocket read error: %v", err)
+					return
+				}
+				var input struct {
+					Text string `json:"text"`
+				}
+				if err := json.Unmarshal(message, &input); err == nil {
+					comment, _ := taskService.AddComment(c.Request.Context(), taskID, userID, input.Text)
+					commentJSON, _ := json.Marshal(comment)
+					taskService.Redis.Publish(c.Request.Context(), "task_chat:"+taskID.String(), commentJSON)
+				}
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-redisChan:
+				if !ok {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+					log.Printf("WebSocket write error: %v", err)
+					return
+				}
 			}
 		}
 	})
@@ -218,52 +288,6 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Event deleted"})
 	})
 
-	r.GET("/ws/tasks/:task_id/chat", func(c *gin.Context) {
-		taskID, _ := uuid.Parse(c.Param("task_id"))
-		userID := c.GetString("user_id")
-		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-		if err != nil {
-			log.Printf("WebSocket upgrade failed: %v", err)
-			return
-		}
-		defer conn.Close()
-
-		pubsub := redisClient.Subscribe(context.Background(), "task_chat:"+taskID.String())
-		defer pubsub.Close()
-		redisChan := pubsub.Channel()
-
-		comments, _ := taskService.GetTaskComments(c.Request.Context(), taskID)
-		for _, comment := range comments {
-			commentJSON, _ := json.Marshal(comment)
-			conn.WriteMessage(websocket.TextMessage, commentJSON)
-		}
-
-		go func() {
-			for {
-				_, message, err := conn.ReadMessage()
-				if err != nil {
-					log.Printf("WebSocket read error: %v", err)
-					break
-				}
-				var input struct {
-					Text string `json:"text"`
-				}
-				if err := json.Unmarshal(message, &input); err == nil {
-					comment, _ := taskService.AddComment(c.Request.Context(), taskID, userID, input.Text)
-					commentJSON, _ := json.Marshal(comment)
-					taskService.Redis.Publish(c.Request.Context(), "task_chat:"+taskID.String(), commentJSON)
-				}
-			}
-		}()
-
-		for msg := range redisChan {
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				break
-			}
-		}
-	})
-
 	// Эндпоинты задач
 	api := r.Group("/tasks")
 	{
@@ -286,14 +310,52 @@ func main() {
 		api.GET("/task", taskHandler.GetTaskStats)
 		api.POST("/follow-up", taskHandler.CreateFollowUpTask)
 		api.GET("/sales/analytics", taskHandler.GetSalesAnalytics)
-
-		// Новые эндпоинты с валидацией
-		api.POST("/:id/time/start", taskHandler.StartTimeTracking)
+		api.POST("/:task_id/time/start", taskHandler.StartTimeTracking)
 		api.POST("/time/stop", taskHandler.StopTimeTracking)
 		api.GET("/users/:user_id/time-report", taskHandler.GetTimeReport)
 		api.POST("/payroll/calculate", taskHandler.CalculatePayroll)
 		api.POST("/onboarding", taskHandler.CreateOnboardingChecklist)
 		api.POST("/leave/request", taskHandler.CreateLeaveRequest)
+		api.GET("/time/active", taskHandler.GetActiveTimeEntries)
+		api.GET("/time/total", taskHandler.GetTotalActiveTime)
+		api.GET("/payroll/aggregate", taskHandler.GetAggregatePayroll)
+
+		// Эндпоинты финансовых событий
+		api.POST("/financial-events", func(c *gin.Context) {
+			var event services.FinancialEvent
+			if err := c.ShouldBindJSON(&event); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			userID := c.GetString("user_id")
+			createdEvent, err := taskService.CreateFinancialEvent(c.Request.Context(), userID, &event)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, createdEvent)
+		})
+
+		api.GET("/financial-events", func(c *gin.Context) {
+			userID := c.GetString("user_id")
+			var startDate, endDate *time.Time
+			if startStr := c.Query("start_date"); startStr != "" {
+				if t, err := time.Parse("2006-01-02", startStr); err == nil {
+					startDate = &t
+				}
+			}
+			if endStr := c.Query("end_date"); endStr != "" {
+				if t, err := time.Parse("2006-01-02", endStr); err == nil {
+					endDate = &t
+				}
+			}
+			events, err := taskService.GetFinancialEvents(c.Request.Context(), userID, startDate, endDate)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, events)
+		})
 	}
 
 	// Эндпоинты управления пользователями
@@ -340,76 +402,6 @@ func main() {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "User updated"})
-	})
-
-	// Внутри группы api в main.go
-	api.POST("/financial-events", func(c *gin.Context) {
-		var event FinancialEvent
-		if err := c.ShouldBindJSON(&event); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		userID := c.GetString("user_id")
-		createdEvent, err := taskService.CreateFinancialEvent(c.Request.Context(), userID, &event)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, createdEvent)
-	})
-
-	api.GET("/financial-events", func(c *gin.Context) {
-		userID := c.GetString("user_id")
-		var startDate, endDate *time.Time
-		if startStr := c.Query("start_date"); startStr != "" {
-			if t, err := time.Parse("2006-01-02", startStr); err == nil {
-				startDate = &t
-			}
-		}
-		if endStr := c.Query("end_date"); endStr != "" {
-			if t, err := time.Parse("2006-01-02", endStr); err == nil {
-				endDate = &t
-			}
-		}
-		events, err := taskService.GetFinancialEvents(c.Request.Context(), userID, startDate, endDate)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, events)
-	})
-
-	api.POST("/:task_id/time/start", func(c *gin.Context) {
-		taskID, _ := uuid.Parse(c.Param("task_id"))
-		userID := c.GetString("user_id")
-		entry, err := taskService.StartTimeTracking(c.Request.Context(), taskID, userID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, entry)
-	})
-
-	api.POST("/:task_id/time/stop", func(c *gin.Context) {
-		entryID, _ := uuid.Parse(c.Query("entry_id"))
-		userID := c.GetString("user_id")
-		entry, err := taskService.StopTimeTracking(c.Request.Context(), entryID, userID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, entry)
-	})
-
-	api.GET("/users/:user_id/time-report", func(c *gin.Context) {
-		userID := c.Param("user_id")
-		period := c.Query("period")
-		entries, err := taskService.GetTimeReport(c.Request.Context(), userID, period)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, entries)
 	})
 
 	r.GET("/health", func(c *gin.Context) {

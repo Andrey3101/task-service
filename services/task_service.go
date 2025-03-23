@@ -19,7 +19,6 @@ import (
 type TaskService struct {
 	DB             *gorm.DB
 	Redis          *redis.Client
-	RabbitMQ       *amqp.Channel
 	GoogleCalendar *GoogleCalendarService
 	RabbitMQConn   *amqp.Connection
 	RabbitMQChan   *amqp.Channel
@@ -65,6 +64,17 @@ type SalesAnalytics struct {
 	ConversionRate float64        `json:"conversion_rate"`
 	ChannelStats   map[string]int `json:"channel_stats"`
 	Funnel         map[string]int `json:"funnel"`
+}
+
+type FinancialEvent struct {
+	EventID   uuid.UUID `json:"event_id" gorm:"type:uuid;primaryKey"`
+	UserID    string    `json:"user_id" gorm:"not null"`
+	Title     string    `json:"title" gorm:"not null"`
+	DueDate   time.Time `json:"due_date" gorm:"not null"`
+	Amount    float64   `json:"amount"`
+	Category  string    `json:"category"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (s *TaskService) GetSalesAnalytics(ctx context.Context, userID string, period string) (*SalesAnalytics, error) {
@@ -124,18 +134,24 @@ func NewTaskService(db *gorm.DB, redisClient *redis.Client, googleCalendar *Goog
 		conn.Close()
 		return nil, err
 	}
-	service, err := &TaskService{
+	service := &TaskService{
 		DB:             db,
 		Redis:          redisClient,
 		GoogleCalendar: googleCalendar,
 		RabbitMQConn:   conn,
 		RabbitMQChan:   ch,
 	}
-	if err != nil {
-		return nil, err
-	}
-	service.ConsumeRabbitMQ(context.Background())
+	go service.ConsumeRabbitMQ(context.Background())
 	return service, nil
+}
+
+func (s *TaskService) Close() {
+	if err := s.RabbitMQChan.Close(); err != nil {
+		log.Printf("Error closing RabbitMQ channel: %v", err)
+	}
+	if err := s.RabbitMQConn.Close(); err != nil {
+		log.Printf("Error closing RabbitMQ connection: %v", err)
+	}
 }
 
 func (s *TaskService) CreateTask(ctx context.Context, userID string, task *models.Task, autoAssign bool) (*models.Task, error) {
@@ -145,14 +161,12 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 		task.Priority = 1
 	}
 
-	// Валидация AssigneeIDs
-	for _, assigneeID := range task.AssigneeIDs {
+	for _, assignee := range task.Assignees {
 		var count int64
-		if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", assigneeID).Count(&count).Error; err != nil || count == 0 {
-			return nil, fmt.Errorf("assignee with ID %s not found", assigneeID)
+		if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", assignee.UserID).Count(&count).Error; err != nil || count == 0 {
+			return nil, fmt.Errorf("assignee with ID %s not found", assignee.UserID)
 		}
 	}
-
 	tx := s.DB.WithContext(ctx).Begin()
 	if err := tx.Create(task).Error; err != nil {
 		tx.Rollback()
@@ -164,15 +178,14 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 	}
 	tx.Commit()
 
-	// Отправка в RabbitMQ для генерации коммерческого предложения, если задача — follow-up
 	if strings.ToLower(task.Description) == "follow-up" || strings.Contains(strings.ToLower(task.Title), "follow-up") {
 		action := map[string]interface{}{
 			"type": "generate_proposal",
 			"data": map[string]interface{}{
 				"template_id": "proposal_v1",
 				"client_data": map[string]interface{}{
-					"name":        "Клиент из задачи " + task.Title, // Можно уточнить через ClientID
-					"amount":      10000,                            // Пример, можно динамически
+					"name":        "Клиент из задачи " + task.Title,
+					"amount":      10000,
 					"description": task.Description,
 				},
 				"user_id": userID,
@@ -180,20 +193,12 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 			},
 		}
 		actionJSON, _ := json.Marshal(action)
-		err := s.RabbitMQChan.Publish(
-			"",               // exchange
-			"document_queue", // routing key
-			false,            // mandatory
-			false,            // immediate
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        actionJSON,
-			},
-		)
+		err := s.RabbitMQChan.Publish("", "document_queue", false, false, amqp.Publishing{
+			ContentType: "application/json",
+			Body:        actionJSON,
+		})
 		if err != nil {
 			log.Printf("Ошибка отправки в RabbitMQ: %v", err)
-		} else {
-			log.Printf("Отправлено в RabbitMQ для генерации предложения для задачи %s", task.ID)
 		}
 	}
 
@@ -290,7 +295,7 @@ func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *model
 	}
 
 	taskData, _ := json.Marshal(task)
-	if err := s.RabbitMQ.Publish("", "tasks_queue", false, false, amqp.Publishing{
+	if err := s.RabbitMQChan.Publish("", "tasks_queue", false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Body:        taskData,
 	}); err != nil {
@@ -329,7 +334,7 @@ func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID s
 		"user_id": userID,
 	}
 	data, _ := json.Marshal(deleteData)
-	if err := s.RabbitMQ.Publish("", "tasks_queue", false, false, amqp.Publishing{
+	if err := s.RabbitMQChan.Publish("", "tasks_queue", false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Body:        data,
 	}); err != nil {
@@ -837,7 +842,6 @@ func (s *TaskService) StartTimeTracking(ctx context.Context, userID, taskID stri
 	if err := s.DB.WithContext(ctx).Create(entry).Error; err != nil {
 		return nil, err
 	}
-	// Инвалидируем кэш отчета по времени
 	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", userID))
 	return entry, nil
 }
@@ -855,14 +859,114 @@ func (s *TaskService) StopTimeTracking(ctx context.Context, entryID string) (*mo
 	if !entry.EndTime.IsZero() {
 		return nil, fmt.Errorf("time tracking already stopped")
 	}
-	entry.EndTime = time.Now()
-	entry.Duration = int(entry.EndTime.Sub(entry.StartTime).Minutes())
+	now := time.Now()
+	entry.EndTime = now
+	entry.Duration = int(now.Sub(entry.StartTime).Minutes())
 	if err := s.DB.WithContext(ctx).Save(&entry).Error; err != nil {
 		return nil, err
 	}
-	// Инвалидируем кэш отчета по времени
 	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", entry.UserID))
 	return &entry, nil
+}
+
+// GetActiveTimeEntries возвращает активные записи времени для пользователя
+func (s *TaskService) GetActiveTimeEntries(ctx context.Context, userID string) ([]models.TimeEntry, error) {
+	var entries []models.TimeEntry
+	if err := s.DB.WithContext(ctx).
+		Where("user_id = ? AND end_time IS NULL", userID).
+		Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch active time entries: %v", err)
+	}
+	return entries, nil
+}
+
+// CalculateTotalActiveTime подсчитывает общее время активных записей в минутах
+func (s *TaskService) CalculateTotalActiveTime(ctx context.Context, userID string) (int, error) {
+	entries, err := s.GetActiveTimeEntries(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	totalMinutes := 0
+	now := time.Now()
+	for _, entry := range entries {
+		totalMinutes += int(now.Sub(entry.StartTime).Minutes())
+	}
+	return totalMinutes, nil
+}
+
+func (s *TaskService) CreateOnboardingTasks(ctx context.Context, userID, companyType string) error {
+	onboardingTasks := []struct {
+		Title       string
+		Description string
+		Priority    string
+	}{
+		{"Заполнить профиль", "Укажите дополнительные данные в профиле", "high"},
+		{"Подключить Google Calendar", "Настройте интеграцию с календарем", "medium"},
+	}
+	if companyType == "ooo" {
+		onboardingTasks = append(onboardingTasks, struct {
+			Title       string
+			Description string
+			Priority    string
+		}{"Добавить сотрудников", "Пригласите коллег в систему", "medium"})
+	}
+
+	dueDate := time.Now().Add(7 * 24 * time.Hour)
+	for _, task := range onboardingTasks {
+		priorityMap := map[string]int{"high": 3, "medium": 2, "low": 1}
+		newTask := &models.Task{
+			ID:          uuid.New(),
+			Title:       task.Title,
+			Description: task.Description,
+			Priority:    priorityMap[task.Priority],
+			CreatedBy:   userID,
+			CreatedAt:   time.Now(),
+			DueDate:     dueDate,
+			Status:      "pending",
+		}
+		if err := s.DB.WithContext(ctx).Create(newTask).Error; err != nil {
+			log.Printf("Ошибка создания онбординг-задачи: %v", err)
+			return err
+		}
+
+		// Интеграция с Google Calendar, если настроена
+		if s.GoogleCalendar.Client != nil {
+			eventID, err := s.GoogleCalendar.CreateEvent(ctx, newTask.ID.String(), newTask.Title, newTask.Description, newTask.DueDate)
+			if err != nil {
+				log.Printf("Ошибка создания события в Google Calendar: %v", err)
+			} else {
+				s.Redis.Set(ctx, "calendar_event:"+newTask.ID.String(), eventID, 0)
+			}
+		}
+
+		// Уведомление через RabbitMQ
+		notification := map[string]interface{}{
+			"type": "notify_user",
+			"data": map[string]interface{}{
+				"user_id":  userID,
+				"message":  fmt.Sprintf("Новая онбординг-задача: %s, дедлайн: %s", newTask.Title, newTask.DueDate.Format("2006-01-02")),
+				"priority": 5,
+			},
+		}
+		notificationJSON, _ := json.Marshal(notification)
+		if err := s.RabbitMQChan.Publish("", "notifications_queue", false, false, amqp.Publishing{
+			ContentType: "application/json",
+			Body:        notificationJSON,
+		}); err != nil {
+			log.Printf("Ошибка отправки уведомления: %v", err)
+		}
+
+		s.invalidateCache(ctx, "tasks:*")
+		event := struct {
+			TaskID    string    `json:"task_id"`
+			Action    string    `json:"action"`
+			CreatedAt time.Time `json:"created_at"`
+		}{TaskID: newTask.ID.String(), Action: "create", CreatedAt: newTask.CreatedAt}
+		eventJSON, _ := json.Marshal(event)
+		s.Redis.Publish(ctx, "task_updates", eventJSON)
+	}
+	log.Printf("Онбординг-задачи созданы для пользователя %s", userID)
+	return nil
 }
 
 // invalidateCache инвалидирует кэш по заданному шаблону
@@ -876,27 +980,6 @@ func (s *TaskService) invalidateCache(ctx context.Context, pattern string) {
 		s.Redis.Del(ctx, key)
 		log.Printf("Кэш инвалидирован для %s", key)
 	}
-}
-
-// StopTimeTracking останавливает отслеживание времени
-func (s *TaskService) StopTimeTracking(ctx context.Context, entryID string) (*models.TimeEntry, error) {
-	entryUUID, err := uuid.Parse(entryID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid entry ID: %v", err)
-	}
-	var entry models.TimeEntry
-	if err := s.DB.WithContext(ctx).Where("id = ?", entryUUID).First(&entry).Error; err != nil {
-		return nil, fmt.Errorf("time entry not found: %v", err)
-	}
-	if !entry.EndTime.IsZero() {
-		return nil, fmt.Errorf("time tracking already stopped")
-	}
-	entry.EndTime = time.Now()
-	entry.Duration = int(entry.EndTime.Sub(entry.StartTime).Minutes())
-	if err := s.DB.WithContext(ctx).Save(&entry).Error; err != nil {
-		return nil, err
-	}
-	return &entry, nil
 }
 
 // GetTimeReport возвращает отчет по времени с кэшированием
@@ -1022,9 +1105,64 @@ func (s *TaskService) CalculatePayroll(ctx context.Context, userID, period strin
 	return payroll, nil
 }
 
+// GetAggregatePayroll возвращает агрегированные данные о зарплате всех сотрудников за указанный период
+func (s *TaskService) GetAggregatePayroll(ctx context.Context, userID, period string) ([]map[string]interface{}, error) {
+	// Проверка роли пользователя
+	var role string
+	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", userID).Scan(&role).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+	if role != "admin" {
+		return nil, fmt.Errorf("only admins can access aggregate payroll data")
+	}
+
+	// Получаем company_id пользователя
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("company not found: %v", err)
+	}
+
+	// Кэширование результата
+	cacheKey := fmt.Sprintf("aggregate_payroll:%s:%s", companyID.String(), period)
+	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
+		var payrollData []map[string]interface{}
+		if err := json.Unmarshal(cached, &payrollData); err == nil {
+			log.Printf("GetAggregatePayroll: данные получены из кэша для %s", cacheKey)
+			return payrollData, nil
+		}
+	}
+
+	// Запрос к базе данных для получения агрегированных данных
+	var payrollData []map[string]interface{}
+	query := `
+        SELECT 
+            u.user_id AS employee_id,
+            u.name AS employee_name,
+            u.department AS department,
+            p.net_salary AS amount,
+            p.period AS period
+        FROM payroll p
+        JOIN users u ON p.user_id = u.user_id
+        WHERE u.company_id = ? AND p.period = ?
+    `
+	if err := s.DB.WithContext(ctx).
+		Raw(query, companyID, period).
+		Scan(&payrollData).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch aggregate payroll data: %v", err)
+	}
+
+	// Сохраняем в кэш с TTL 1 час
+	if data, err := json.Marshal(payrollData); err == nil {
+		s.Redis.Set(ctx, cacheKey, data, 1*time.Hour)
+		log.Printf("GetAggregatePayroll: данные сохранены в кэш для %s", cacheKey)
+	}
+
+	return payrollData, nil
+}
+
 // Новая функция в task_service.go
-func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]Comment, error) {
-	var comments []Comment
+func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]models.Comment, error) {
+	var comments []models.Comment
 	if err := s.DB.WithContext(ctx).Where("task_id = ?", taskID).Find(&comments).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch comments: %v", err)
 	}
@@ -1123,6 +1261,12 @@ func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 				userID := data["user_id"].(string)
 				if err := s.CreateOnboardingChecklist(ctx, userID); err != nil {
 					log.Printf("Ошибка создания онбординга: %v", err)
+				}
+			case "create_onboarding_tasks":
+				userID := data["user_id"].(string)
+				companyType := data["company_type"].(string)
+				if err := s.CreateOnboardingTasks(ctx, userID, companyType); err != nil {
+					log.Printf("Ошибка создания онбординг-задач: %v", err)
 				}
 			case "create_leave_request":
 				userID := data["user_id"].(string)

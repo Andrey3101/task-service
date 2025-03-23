@@ -35,7 +35,12 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 		req.Header.Set("Authorization", authHeader)
 		client := &http.Client{}
 		resp, err := client.Do(req)
-		defer resp.Body.Close() // Добавлено закрытие тела ответа
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate token"})
+			c.Abort()
+			return
+		}
+		defer resp.Body.Close()
 
 		var user struct {
 			UserID string `json:"user_id"`
@@ -43,6 +48,11 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token response"})
+			c.Abort()
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			c.JSON(resp.StatusCode, gin.H{"error": "Failed to validate token"})
 			c.Abort()
 			return
 		}

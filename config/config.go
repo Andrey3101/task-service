@@ -14,6 +14,7 @@ type Config struct {
 	GoogleClientID      string
 	GoogleClientSecret  string
 	GoogleRedirectURI   string
+	AuthService         string
 }
 
 func LoadConfig() Config {
@@ -29,6 +30,7 @@ func LoadConfig() Config {
 		GoogleClientID:      getEnv("GOOGLE_CLIENT_ID", "your-google-client-id"),
 		GoogleClientSecret:  getEnv("GOOGLE_CLIENT_SECRET", "your-google-client-secret"),
 		GoogleRedirectURI:   getEnv("GOOGLE_REDIRECT_URI", "http://localhost:8082/google/callback"),
+		AuthService:         getEnv("AuthService", "http://localhost:8082"),
 	}
 }
 
