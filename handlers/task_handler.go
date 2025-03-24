@@ -67,7 +67,7 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	taskInput.ID = uuid.New()
 	taskInput.CreatedAt = time.Now()
 	taskInput.Status = "pending"
-	taskInput.AssigneeIDs = taskInput.AssigneeIDs
+	taskInput.Task.AssigneeIDs = taskInput.AssigneeIDs
 
 	task, err := h.Service.CreateTask(c.Request.Context(), userID, &taskInput.Task, false)
 	if err != nil {
@@ -93,7 +93,6 @@ func (h *TaskHandler) GetTaskStats(c *gin.Context) {
 	status := c.Query("status")
 	period := c.Query("period")
 
-	// Валидация параметров
 	if period != "" && period != "week" && period != "yesterday" && period != "today" && period != "month" && period != "year" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid period"})
 		return
@@ -225,7 +224,7 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 	}
 
 	taskInput.ID = id
-	taskInput.AssigneeIDs = taskInput.AssigneeIDs
+	taskInput.Task.AssigneeIDs = taskInput.AssigneeIDs
 	task, err = h.Service.UpdateTask(c.Request.Context(), userID, &taskInput.Task)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
@@ -421,7 +420,7 @@ func (h *TaskHandler) GetMyTasks(c *gin.Context) {
 
 	tasks, total, err := h.Service.GetMyTasks(c.Request.Context(), userID, limit, offset, search)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": total})
@@ -656,6 +655,23 @@ func (h *TaskHandler) StartTimeTracking(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
 		return
 	}
+
+	// Проверка компании
+	var taskCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM tasks WHERE id = ?", taskID).Scan(&taskCompanyID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
+		return
+	}
+	var userCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&userCompanyID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	if taskCompanyID != userCompanyID {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied") + ": task belongs to another company"})
+		return
+	}
+
 	entry, err := h.Service.StartTimeTracking(c.Request.Context(), userID, taskID.String())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -688,11 +704,35 @@ func (h *TaskHandler) StopTimeTracking(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": entry_id is required"})
 		return
 	}
+
 	entry, err := h.Service.StopTimeTracking(c.Request.Context(), entryID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Проверка компании через задачу, связанную с записью времени
+	var taskCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM tasks WHERE id = ?", entry.TaskID).Scan(&taskCompanyID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	var userCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&userCompanyID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	if taskCompanyID != userCompanyID {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied") + ": task belongs to another company"})
+		return
+	}
+
+	// Проверка владельца или роли
+	if entry.UserID != userID && role != "admin" && role != "super_admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
+		return
+	}
+
 	c.JSON(http.StatusOK, entry)
 }
 
@@ -708,7 +748,7 @@ func (h *TaskHandler) GetActiveTimeEntries(c *gin.Context) {
 	userID := c.GetString("user_id")
 	entries, err := h.Service.GetActiveTimeEntries(c.Request.Context(), userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, entries)
@@ -770,9 +810,25 @@ func (h *TaskHandler) GetTimeReport(c *gin.Context) {
 
 	userID := c.Param("user_id")
 	period := c.Query("period")
+
+	var requestorCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM users WHERE user_id = ?", c.GetString("user_id")).Scan(&requestorCompanyID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	var targetCompanyID uuid.UUID
+	if err := h.Service.DB.WithContext(c.Request.Context()).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&targetCompanyID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("user_not_found")})
+		return
+	}
+	if requestorCompanyID != targetCompanyID {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied") + ": user belongs to another company"})
+		return
+	}
+
 	entries, err := h.Service.GetTimeReport(c.Request.Context(), userID, period)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, entries)
@@ -802,9 +858,10 @@ func (h *TaskHandler) CalculatePayroll(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": period is required"})
 		return
 	}
+
 	payroll, err := h.Service.CalculatePayroll(c.Request.Context(), userID, period)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, payroll)
@@ -1003,9 +1060,10 @@ func (h *TaskHandler) CreateLeaveRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": invalid end_date"})
 		return
 	}
+
 	request, err := h.Service.CreateLeaveRequest(c.Request.Context(), userID, input.Type, startDate, endDate)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, request)

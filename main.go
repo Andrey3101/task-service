@@ -72,7 +72,6 @@ func main() {
 	}
 	defer rabbitCh.Close()
 
-	authService := services.NewAuthService(cfg, redisClient, db)
 	googleCalendar := services.NewGoogleCalendarService(cfg, redisClient)
 	taskService, err := services.NewTaskService(db, redisClient, googleCalendar, cfg.RabbitMQ)
 	if err != nil {
@@ -85,7 +84,7 @@ func main() {
 	go queueService.StartConsumer()
 
 	r := gin.Default()
-	r.Use(middleware.AuthMiddleware(authService))
+	r.Use(middleware.AuthMiddleware(cfg))
 
 	// WebSocket для обновлений задач
 	r.GET("/ws/tasks", func(c *gin.Context) {

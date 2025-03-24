@@ -25,7 +25,6 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 			return
 		}
 
-		token := parts[1]
 		req, err := http.NewRequest("GET", cfg.AuthService+"/profile", nil)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})

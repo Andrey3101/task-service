@@ -26,7 +26,6 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 			return
 		}
 
-		token := parts[1]
 		client := &http.Client{Timeout: 5 * time.Second} // Добавлен тайм-аут
 		req, err := http.NewRequest("GET", cfg.AuthService+"/profile", nil)
 		if err != nil {

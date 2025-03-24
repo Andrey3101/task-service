@@ -85,6 +85,11 @@ type FinancialEvent struct {
 }
 
 func (s *TaskService) GetSalesAnalytics(ctx context.Context, userID string, period string) (*SalesAnalytics, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
 	var tasks []models.Task
 	query := s.DB.Where("created_by = ?", userID)
 	if period != "" {
@@ -311,6 +316,11 @@ func (s *TaskService) GetProductivityReport(ctx context.Context, userID, period 
 			log.Printf("GetProductivityReport: данные из кэша для %s", cacheKey)
 			return report, nil
 		}
+	}
+
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
 	}
 
 	var entries []models.TimeEntry
@@ -791,7 +801,6 @@ func (s *TaskService) CreateTaskWithPrediction(ctx context.Context, userID strin
 
 // GetTaskStats возвращает статистику задач для графиков
 func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period string) (map[string]interface{}, error) {
-	// Кэширование результата
 	cacheKey := fmt.Sprintf("task_stats:%s:%s:%s", userID, status, period)
 	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
 		var stats map[string]interface{}
@@ -800,7 +809,6 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
 		}
 	}
 
-	// Получаем company_id пользователя
 	var companyID uuid.UUID
 	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
 		return nil, fmt.Errorf("user not found: %v", err)
@@ -812,10 +820,9 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
 		"inProgressToday":         0,
 		"totalCompletedLastWeek":  0,
 		"totalCompletedYesterday": 0,
-		"weeklyTrends":            map[string]int{}, // Тренды за последние 4 недели
+		"weeklyTrends":            map[string]int{},
 	}
 
-	// Текущая статистика
 	weekStart := time.Now().AddDate(0, 0, -7)
 	yesterdayStart := time.Now().AddDate(0, 0, -1).Truncate(24 * time.Hour)
 	yesterdayEnd := yesterdayStart.Add(24*time.Hour - time.Second)
@@ -839,12 +846,21 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
             COALESCE(SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN cost ELSE 0 END), 0) as total_completed_last_week,
             COALESCE(SUM(CASE WHEN status = 'completed' AND completed_at BETWEEN ? AND ? THEN cost ELSE 0 END), 0) as total_completed_yesterday
         FROM tasks
-        WHERE created_by IN (SELECT user_id FROM users WHERE company_id = ?)
+        WHERE company_id = ?
     `
-	if err := s.DB.WithContext(ctx).
-		Raw(query, weekStart, time.Now(), yesterdayStart, yesterdayEnd, todayStart, todayEnd, weekStart, time.Now(), yesterdayStart, yesterdayEnd, companyID).
-		Scan(&taskStats).Error; err != nil {
-		return nil, err
+	if status != "" {
+		query += " AND status = ?"
+		if err := s.DB.WithContext(ctx).
+			Raw(query, weekStart, time.Now(), yesterdayStart, yesterdayEnd, todayStart, todayEnd, weekStart, time.Now(), yesterdayStart, yesterdayEnd, companyID, status).
+			Scan(&taskStats).Error; err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.DB.WithContext(ctx).
+			Raw(query, weekStart, time.Now(), yesterdayStart, yesterdayEnd, todayStart, todayEnd, weekStart, time.Now(), yesterdayStart, yesterdayEnd, companyID).
+			Scan(&taskStats).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	result["completedLastWeek"] = taskStats.CompletedLastWeek
@@ -853,7 +869,6 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
 	result["totalCompletedLastWeek"] = int(taskStats.TotalCompletedLastWeek)
 	result["totalCompletedYesterday"] = int(taskStats.TotalCompletedYesterday)
 
-	// Тренды за последние 4 недели
 	weeklyTrends := make(map[string]int)
 	for i := 0; i < 4; i++ {
 		start := time.Now().AddDate(0, 0, -7*(i+1))
@@ -861,14 +876,13 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
 		var count int64
 		s.DB.WithContext(ctx).
 			Model(&models.Task{}).
-			Where("status = 'completed' AND created_by IN (SELECT user_id FROM users WHERE company_id = ?) AND completed_at BETWEEN ? AND ?", companyID, start, end).
+			Where("status = 'completed' AND company_id = ? AND completed_at BETWEEN ? AND ?", companyID, start, end).
 			Count(&count)
 		weekLabel := start.Format("2006-01-02")
 		weeklyTrends[weekLabel] = int(count)
 	}
 	result["weeklyTrends"] = weeklyTrends
 
-	// Сохраняем в кэш
 	if data, err := json.Marshal(result); err == nil {
 		s.Redis.Set(ctx, cacheKey, data, 5*time.Minute)
 	}
@@ -930,10 +944,15 @@ func (s *TaskService) GetDashboard(ctx context.Context, userID string, filters m
 }
 
 func (s *TaskService) GetMyTasks(ctx context.Context, userID string, limit, offset int, search string) ([]models.Task, int, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, 0, fmt.Errorf("user not found: %v", err)
+	}
+
 	query := s.DB.WithContext(ctx).
 		Preload("Assignees").
 		Preload("Comments").
-		Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)", userID)
+		Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?) AND company_id = ?", userID, companyID)
 
 	if search != "" {
 		query = query.Where("title ILIKE ? OR description ILIKE ?", "%"+search+"%", "%"+search+"%")
@@ -1150,6 +1169,11 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 
 // GetFinancialEvents возвращает список финансовых событий пользователя
 func (s *TaskService) GetFinancialEvents(ctx context.Context, userID string, startDate, endDate *time.Time) ([]FinancialEvent, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
 	var events []FinancialEvent
 	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
 	if startDate != nil && endDate != nil {
@@ -1209,9 +1233,16 @@ func (s *TaskService) StopTimeTracking(ctx context.Context, entryID string) (*mo
 
 // GetActiveTimeEntries возвращает активные записи времени для пользователя
 func (s *TaskService) GetActiveTimeEntries(ctx context.Context, userID string) ([]models.TimeEntry, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
 	var entries []models.TimeEntry
 	if err := s.DB.WithContext(ctx).
 		Where("user_id = ? AND end_time IS NULL", userID).
+		Joins("JOIN tasks ON tasks.id = time_entries.task_id").
+		Where("tasks.company_id = ?", companyID).
 		Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch active time entries: %v", err)
 	}
@@ -1233,6 +1264,11 @@ func (s *TaskService) CalculateTotalActiveTime(ctx context.Context, userID strin
 }
 
 func (s *TaskService) CreateOnboardingTasks(ctx context.Context, userID, companyType string) error {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return fmt.Errorf("user not found: %v", err)
+	}
+
 	onboardingTasks := []struct {
 		Title       string
 		Description string
@@ -1331,8 +1367,16 @@ func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period s
 		}
 	}
 
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
 	var entries []models.TimeEntry
-	query := s.DB.WithContext(ctx).Where("user_id = ?", userID)
+	query := s.DB.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Joins("JOIN tasks ON tasks.id = time_entries.task_id").
+		Where("tasks.company_id = ?", companyID)
 	switch period {
 	case "day":
 		query = query.Where("start_time >= ?", time.Now().Truncate(24*time.Hour))
@@ -1340,14 +1384,11 @@ func (s *TaskService) GetTimeReport(ctx context.Context, userID string, period s
 		query = query.Where("start_time >= ?", time.Now().AddDate(0, 0, -7))
 	case "month":
 		query = query.Where("start_time >= ?", time.Now().AddDate(0, -1, 0))
-	default:
-		// Если period не указан, возвращаем все записи
 	}
 	if err := query.Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch time report: %v", err)
 	}
 
-	// Сохраняем в кэш с TTL 10 минут
 	if data, err := json.Marshal(entries); err == nil {
 		s.Redis.Set(ctx, cacheKey, data, 10*time.Minute)
 		log.Printf("GetTimeReport: данные сохранены в кэш для %s", cacheKey)
@@ -1395,22 +1436,31 @@ func (s *TaskService) CalculatePayroll(ctx context.Context, userID, period strin
 		}
 	}
 
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
+
 	var totalHours int
 	type User struct {
 		Rate    float64 `gorm:"column:rate"`
 		TaxRate float64 `gorm:"column:tax_rate"`
 	}
 	var user User
-	if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", userID).First(&user).Error; err != nil {
-		return nil, fmt.Errorf("user not found: %v", err)
+	if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ? AND company_id = ?", userID, companyID).First(&user).Error; err != nil {
+		return nil, fmt.Errorf("user not found in company: %v", err)
 	}
 
 	entries := []models.TimeEntry{}
-	if err := s.DB.WithContext(ctx).Where("user_id = ? AND start_time LIKE ?", userID, period+"%").Find(&entries).Error; err != nil {
+	if err := s.DB.WithContext(ctx).
+		Where("user_id = ? AND start_time LIKE ?", userID, period+"%").
+		Joins("JOIN tasks ON tasks.id = time_entries.task_id").
+		Where("tasks.company_id = ?", companyID).
+		Find(&entries).Error; err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
-		totalHours += entry.Duration / 60 // Переводим минуты в часы
+		totalHours += entry.Duration / 60
 	}
 
 	grossSalary := float64(totalHours) * user.Rate
@@ -1431,15 +1481,12 @@ func (s *TaskService) CalculatePayroll(ctx context.Context, userID, period strin
 		return nil, err
 	}
 
-	// Сохраняем в кэш с TTL 1 час
 	if data, err := json.Marshal(payroll); err == nil {
 		s.Redis.Set(ctx, cacheKey, data, 1*time.Hour)
 		log.Printf("CalculatePayroll: данные сохранены в кэш для %s", cacheKey)
 	}
 
-	// Инвалидируем кэш отчета по времени
 	s.invalidateCache(ctx, fmt.Sprintf("time_report:%s:*", userID))
-
 	return payroll, nil
 }
 
@@ -1519,17 +1566,17 @@ func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]
 }
 
 func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType string, startDate, endDate time.Time) (*models.LeaveRequest, error) {
-	var overlapping int64
-	s.DB.WithContext(ctx).Model(&models.LeaveRequest{}).
-		Where("user_id = ? AND (start_date <= ? AND end_date >= ?)", userID, endDate, startDate).
-		Count(&overlapping)
-	if overlapping > 0 {
-		return nil, fmt.Errorf("leave request overlaps with existing request")
-	}
-
 	var companyID uuid.UUID
 	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
 		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+
+	var overlapping int64
+	s.DB.WithContext(ctx).Model(&models.LeaveRequest{}).
+		Where("user_id = ? AND company_id = ? AND (start_date <= ? AND end_date >= ?)", userID, companyID, endDate, startDate).
+		Count(&overlapping)
+	if overlapping > 0 {
+		return nil, fmt.Errorf("leave request overlaps with existing request")
 	}
 
 	request := &models.LeaveRequest{
@@ -1550,12 +1597,10 @@ func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType 
 		if err != nil {
 			log.Printf("Ошибка создания события в Google Calendar: %v", err)
 		} else {
-			// Сохраняем eventID в Redis для последующего использования
 			s.Redis.Set(ctx, "calendar_event:leave:"+request.ID.String(), eventID, 0)
 		}
 	}
 
-	// Уведомление через RabbitMQ
 	notification := map[string]interface{}{
 		"type": "notify_user",
 		"data": map[string]interface{}{
