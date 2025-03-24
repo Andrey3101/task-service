@@ -41,20 +41,21 @@ func (s *AuthService) rotateKeys() {
 		s.OldSecret = s.CurrentSecret
 		s.CurrentSecret = fmt.Sprintf("%s-%d", s.Config.JWTSecret, time.Now().Unix())
 		log.Printf("JWT Secret rotated")
-	}
-	s.Redis.Set(context.Background(), "jwt_current_secret", s.CurrentSecret, 0)
-	if s.OldSecret != "" {
-		s.Redis.Set(context.Background(), "jwt_old_secret", s.OldSecret, time.Duration(s.Config.JWTRotationInterval)*time.Second)
+		s.Redis.Set(context.Background(), "jwt_current_secret", s.CurrentSecret, 0)
+		if s.OldSecret != "" {
+			s.Redis.Set(context.Background(), "jwt_old_secret", s.OldSecret, time.Duration(s.Config.JWTRotationInterval)*time.Second)
+		}
 	}
 }
 
 type Claims struct {
-	UserID string `json:"sub"`
-	Role   string `json:"role"`
+	UserID    string    `json:"sub"`
+	Role      string    `json:"role"`
+	CompanyID uuid.UUID `json:"company_id"`
 	jwt.RegisteredClaims
 }
 
-func (s *AuthService) GenerateToken(userID string, role string) (string, error) {
+func (s *AuthService) GenerateToken(userID string, role string, companyID uuid.UUID) (string, error) {
 	validRoles := []string{"user", "manager", "admin", "super_admin"}
 	isValidRole := false
 	for _, validRole := range validRoles {
@@ -67,8 +68,9 @@ func (s *AuthService) GenerateToken(userID string, role string) (string, error) 
 		return "", fmt.Errorf("invalid role: %s", role)
 	}
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		CompanyID: companyID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -86,21 +88,18 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 	if _, err := s.Redis.Get(context.Background(), "blacklist:"+tokenString).Result(); err == nil {
 		return nil, fmt.Errorf("token is blacklisted")
 	}
+
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(s.CurrentSecret), nil
 	})
 	if err == nil && token.Valid {
 		if claims, ok := token.Claims.(*Claims); ok {
+			if claims.ExpiresAt.Before(time.Now()) {
+				return nil, fmt.Errorf("token expired")
+			}
 			s.RoleCache.Store(claims.UserID, claims.Role)
 			return claims, nil
 		}
-	}
-	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		if claims.ExpiresAt.Before(time.Now()) {
-			return nil, fmt.Errorf("token expired")
-		}
-		s.RoleCache.Store(claims.UserID, claims.Role)
-		return claims, nil
 	}
 
 	if s.OldSecret != "" {
@@ -109,6 +108,9 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 		})
 		if err == nil && token.Valid {
 			if claims, ok := token.Claims.(*Claims); ok {
+				if claims.ExpiresAt.Before(time.Now()) {
+					return nil, fmt.Errorf("token expired")
+				}
 				s.RoleCache.Store(claims.UserID, claims.Role)
 				return claims, nil
 			}
@@ -123,6 +125,18 @@ func (s *AuthService) GetRole(userID string) (string, bool) {
 		return role.(string), true
 	}
 	return "", false
+}
+
+func (s *AuthService) Profile(ctx context.Context, tokenString string) (map[string]interface{}, error) {
+	claims, err := s.ValidateToken(tokenString)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token: %v", err)
+	}
+	return map[string]interface{}{
+		"user_id":    claims.UserID,
+		"role":       claims.Role,
+		"company_id": claims.CompanyID,
+	}, nil
 }
 
 func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role string) error {
