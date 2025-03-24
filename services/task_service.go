@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,35 +153,68 @@ func NewTaskService(db *gorm.DB, redisClient *redis.Client, googleCalendar *Goog
 }
 
 func (s *TaskService) Close() {
-	if err := s.RabbitMQChan.Close(); err != nil {
-		log.Printf("Error closing RabbitMQ channel: %v", err)
+	if s.RabbitMQChan != nil {
+		if err := s.RabbitMQChan.Close(); err != nil {
+			log.Printf("Error closing RabbitMQ channel: %v", err)
+		}
 	}
-	if err := s.RabbitMQConn.Close(); err != nil {
-		log.Printf("Error closing RabbitMQ connection: %v", err)
+	if s.RabbitMQConn != nil {
+		if err := s.RabbitMQConn.Close(); err != nil {
+			log.Printf("Error closing RabbitMQ connection: %v", err)
+		}
 	}
 }
 
 func (s *TaskService) CreateTask(ctx context.Context, userID string, task *models.Task, autoAssign bool) (*models.Task, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := make([]byte, 1024)
+			runtime.Stack(stack, false)
+			log.Printf("Паника в CreateTask: %v\nСтек: %s", r, stack)
+		}
+	}()
+
+	if task.Title == "" {
+		return nil, fmt.Errorf("title is required")
+	}
+	if !isValidStatus(task.Status) {
+		return nil, fmt.Errorf("invalid status: %s", task.Status)
+	}
+
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+
 	task.CreatedBy = userID
 	task.CreatedAt = time.Now()
+	task.CompanyID = companyID
 	if task.Priority == 0 {
 		task.Priority = 1
 	}
 
-	for _, assignee := range task.Assignees {
-		var count int64
-		if err := s.DB.WithContext(ctx).Table("users").Where("user_id = ?", assignee.UserID).Count(&count).Error; err != nil || count == 0 {
-			return nil, fmt.Errorf("assignee with ID %s not found", assignee.UserID)
+	// Преобразование AssigneeIDs в Assignees
+	if len(task.AssigneeIDs) > 0 {
+		task.Assignees = make([]models.Assignee, len(task.AssigneeIDs))
+		for i, id := range task.AssigneeIDs {
+			var assigneeCompanyID uuid.UUID
+			if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", id).Scan(&assigneeCompanyID).Error; err != nil || assigneeCompanyID != companyID {
+				return nil, fmt.Errorf("assignee %s not found in company", id)
+			}
+			task.Assignees[i] = models.Assignee{UserID: id}
 		}
 	}
+
 	tx := s.DB.WithContext(ctx).Begin()
 	if err := tx.Create(task).Error; err != nil {
 		tx.Rollback()
-		return nil, err
+		return nil, fmt.Errorf("failed to create task: %v", err)
 	}
-	if err := tx.Model(task).Association("Assignees").Append(task.Assignees); err != nil {
-		tx.Rollback()
-		return nil, err
+	if len(task.Assignees) > 0 {
+		if err := tx.Model(task).Association("Assignees").Append(task.Assignees); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to assign assignees: %v", err)
+		}
 	}
 	tx.Commit()
 
@@ -197,25 +232,41 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 				"task_id": task.ID.String(),
 			},
 		}
-		actionJSON, _ := json.Marshal(action)
-		err := s.RabbitMQChan.Publish("", "document_queue", false, false, amqp.Publishing{
-			ContentType: "application/json",
-			Body:        actionJSON,
-		})
-		if err != nil {
+		if err := publishToRabbitMQ(s.RabbitMQChan, "document_queue", action); err != nil {
 			log.Printf("Ошибка отправки в RabbitMQ: %v", err)
 		}
 	}
 
 	s.invalidateCache(ctx, "tasks:*")
+	publishTaskUpdate(s.Redis, task.ID.String(), "create", task.CreatedAt)
+	return task, nil
+}
+
+// Вспомогательные функции
+func isValidStatus(status string) bool {
+	validStatuses := map[string]bool{"pending": true, "in_progress": true, "completed": true}
+	return validStatuses[status]
+}
+
+func publishToRabbitMQ(ch *amqp.Channel, queue string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return ch.Publish("", queue, false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        jsonData,
+	})
+}
+
+func publishTaskUpdate(redisClient *redis.Client, taskID, action string, createdAt time.Time) {
 	event := struct {
 		TaskID    string    `json:"task_id"`
 		Action    string    `json:"action"`
 		CreatedAt time.Time `json:"created_at"`
-	}{TaskID: task.ID.String(), Action: "create", CreatedAt: task.CreatedAt}
+	}{TaskID: taskID, Action: action, CreatedAt: createdAt}
 	eventJSON, _ := json.Marshal(event)
-	s.Redis.Publish(ctx, "task_updates", eventJSON)
-	return task, nil
+	redisClient.Publish(context.Background(), "task_updates", eventJSON)
 }
 
 // CreateRecurringTask создаёт задачу с повторением
@@ -226,6 +277,10 @@ func (s *TaskService) CreateRecurringTask(ctx context.Context, userID string, ta
 	}
 
 	if recurrence != nil {
+		validIntervals := map[string]bool{"daily": true, "weekly": true, "monthly": true}
+		if !validIntervals[recurrence.Interval] {
+			return nil, fmt.Errorf("invalid recurrence interval: %s", recurrence.Interval)
+		}
 		job := map[string]interface{}{
 			"type":        "create_recurring_task",
 			"task_id":     task.ID.String(),
@@ -337,6 +392,27 @@ func (s *TaskService) CreateTaxReminders(ctx context.Context, userID, companyTyp
 }
 
 func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time.Time, priority, assigneeID, fields string, limit, offset int) ([]models.Task, int, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := make([]byte, 1024)
+			runtime.Stack(stack, false)
+			log.Printf("Panic in GetTasks: %v\nStack: %s", r, stack)
+		}
+	}()
+
+	userID := ctx.Value("user_id").(string)
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get user company: %v", err)
+	}
+
+	if assigneeID != "" {
+		var assigneeCompanyID uuid.UUID
+		if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", assigneeID).Scan(&assigneeCompanyID).Error; err != nil || assigneeCompanyID != companyID {
+			return nil, 0, fmt.Errorf("assignee %s not found in company", assigneeID)
+		}
+	}
+
 	cacheKey := fmt.Sprintf("tasks:%s:%s:%s:%s:%s:%d:%d", status, dueDateString(dueDate), priority, assigneeID, fields, limit, offset)
 	if cached, err := s.Redis.Get(ctx, cacheKey).Bytes(); err == nil {
 		var result struct {
@@ -348,9 +424,11 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 		}
 	}
 
-	query := s.DB.WithContext(ctx).Limit(limit).Offset(offset)
+	query := s.DB.WithContext(ctx).
+		Where("created_by IN (SELECT user_id FROM users WHERE company_id = ?)", companyID).
+		Limit(limit).
+		Offset(offset)
 
-	// Загружаем ассоциации в зависимости от параметра fields
 	if strings.Contains(fields, "assignees") {
 		query = query.Preload("Assignees")
 	}
@@ -358,6 +436,9 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 		query = query.Preload("Comments")
 	}
 
+	if status != "" && !isValidStatus(status) {
+		return nil, 0, fmt.Errorf("invalid status: %s", status)
+	}
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -367,6 +448,9 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 		query = query.Where("due_date BETWEEN ? AND ?", start, end)
 	}
 	if priority != "" {
+		if p, err := strconv.Atoi(priority); err != nil || p < 0 {
+			return nil, 0, fmt.Errorf("invalid priority: %s", priority)
+		}
 		query = query.Where("priority = ?", priority)
 	}
 	if assigneeID != "" {
@@ -375,12 +459,12 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 
 	var total int64
 	if err := query.Model(&models.Task{}).Count(&total).Error; err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to count tasks: %v", err)
 	}
 
 	var tasks []models.Task
 	if err := query.Find(&tasks).Error; err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to fetch tasks: %v", err)
 	}
 
 	result := struct {
@@ -395,18 +479,55 @@ func (s *TaskService) GetTasks(ctx context.Context, status string, dueDate *time
 }
 
 func (s *TaskService) GetTask(ctx context.Context, taskID uuid.UUID) (*models.Task, error) {
+	userID := ctx.Value("user_id").(string)
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+
 	var task models.Task
-	if err := s.DB.WithContext(ctx).Preload("Assignees").Preload("Comments").First(&task, "id = ?", taskID).Error; err != nil {
-		return nil, err
+	if err := s.DB.WithContext(ctx).
+		Preload("Assignees").
+		Preload("Comments").
+		Where("id = ? AND company_id = ?", taskID, companyID).
+		First(&task).Error; err != nil {
+		return nil, fmt.Errorf("task not found or permission denied: %v", err)
 	}
 	return &task, nil
 }
 
 func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *models.Task) (*models.Task, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := make([]byte, 1024)
+			runtime.Stack(stack, false)
+			log.Printf("Паника в UpdateTask: %v\nСтек: %s", r, stack)
+		}
+	}()
+
+	if task.ID == uuid.Nil {
+		return nil, fmt.Errorf("task ID is required")
+	}
+	if task.Title == "" {
+		return nil, fmt.Errorf("title is required")
+	}
+	if !isValidStatus(task.Status) {
+		return nil, fmt.Errorf("invalid status: %s", task.Status)
+	}
+
 	var existingTask models.Task
 	if err := s.DB.WithContext(ctx).First(&existingTask, "id = ?", task.ID).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("task not found: %v", err)
 	}
+
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+	if existingTask.CompanyID != companyID {
+		return nil, fmt.Errorf("permission denied: task belongs to different company")
+	}
+
 	if existingTask.Title != task.Title {
 		s.logTaskChange(ctx, task.ID, "title", existingTask.Title, task.Title)
 	}
@@ -417,32 +538,47 @@ func (s *TaskService) UpdateTask(ctx context.Context, userID string, task *model
 		s.logTaskChange(ctx, task.ID, "priority", fmt.Sprintf("%d", existingTask.Priority), fmt.Sprintf("%d", task.Priority))
 	}
 
-	taskData, _ := json.Marshal(task)
-	if err := s.RabbitMQChan.Publish("", "tasks_queue", false, false, amqp.Publishing{
-		ContentType: "application/json",
-		Body:        taskData,
-	}); err != nil {
-		return nil, err
+	tx := s.DB.WithContext(ctx).Begin()
+	if err := tx.Model(&existingTask).Updates(task).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to update task: %v", err)
 	}
 
+	if len(task.AssigneeIDs) > 0 {
+		if err := tx.Model(&existingTask).Association("Assignees").Clear(); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to clear assignees: %v", err)
+		}
+		newAssignees := make([]models.Assignee, len(task.AssigneeIDs))
+		for i, id := range task.AssigneeIDs {
+			var assigneeCompanyID uuid.UUID
+			if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", id).Scan(&assigneeCompanyID).Error; err != nil || assigneeCompanyID != companyID {
+				tx.Rollback()
+				return nil, fmt.Errorf("assignee %s not found in company", id)
+			}
+			newAssignees[i] = models.Assignee{UserID: id}
+		}
+		if err := tx.Model(&existingTask).Association("Assignees").Append(newAssignees); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to update assignees: %v", err)
+		}
+	}
+	tx.Commit()
+
+	if err := publishToRabbitMQ(s.RabbitMQChan, "tasks_queue", task); err != nil {
+		log.Printf("Ошибка публикации в RabbitMQ: %v", err)
+	}
 	if s.GoogleCalendar.Client != nil {
 		if eventID, err := s.Redis.Get(ctx, "calendar_event:"+task.ID.String()).Result(); err == nil {
-			err = s.GoogleCalendar.UpdateEvent(ctx, task.ID.String(), eventID, task.Title, task.Description, task.DueDate)
-			if err != nil {
-				log.Printf("Failed to update Google Calendar event: %v", err)
+			if err := s.GoogleCalendar.UpdateEvent(ctx, task.ID.String(), eventID, task.Title, task.Description, task.DueDate); err != nil {
+				log.Printf("Ошибка обновления события в Google Calendar: %v", err)
 			}
 		}
 	}
 
 	s.invalidateCache(ctx, "tasks:*")
-	event := struct {
-		TaskID    string    `json:"task_id"`
-		Action    string    `json:"action"`
-		CreatedAt time.Time `json:"created_at"`
-	}{TaskID: task.ID.String(), Action: "update", CreatedAt: task.CreatedAt}
-	eventJSON, _ := json.Marshal(event)
-	s.Redis.Publish(ctx, "task_updates", eventJSON)
-	return task, nil
+	publishTaskUpdate(s.Redis, task.ID.String(), "update", task.CreatedAt)
+	return &existingTask, nil
 }
 
 func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID string) error {
@@ -451,6 +587,13 @@ func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID s
 		return err
 	}
 	s.logTaskChange(ctx, taskID, "deleted", task.Title, "")
+	var role string
+	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", userID).Scan(&role).Error; err != nil {
+		return fmt.Errorf("user not found: %v", err)
+	}
+	if role != "admin" && role != "super_admin" && task.CreatedBy != userID {
+		return fmt.Errorf("permission denied")
+	}
 
 	deleteData := map[string]interface{}{
 		"task_id": taskID.String(),
@@ -485,6 +628,22 @@ func (s *TaskService) DeleteTask(ctx context.Context, taskID uuid.UUID, userID s
 }
 
 func (s *TaskService) AddComment(ctx context.Context, taskID uuid.UUID, userID, text string) (*models.Comment, error) {
+	if text == "" {
+		return nil, fmt.Errorf("comment text is required")
+	}
+
+	var task models.Task
+	if err := s.DB.WithContext(ctx).First(&task, "id = ?", taskID).Error; err != nil {
+		return nil, fmt.Errorf("task not found: %v", err)
+	}
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+	if task.CompanyID != companyID {
+		return nil, fmt.Errorf("permission denied: task belongs to different company")
+	}
+
 	comment := &models.Comment{
 		ID:        uuid.New(),
 		TaskID:    taskID,
@@ -493,7 +652,7 @@ func (s *TaskService) AddComment(ctx context.Context, taskID uuid.UUID, userID, 
 		CreatedAt: time.Now(),
 	}
 	if err := s.DB.WithContext(ctx).Create(comment).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create comment: %v", err)
 	}
 	s.logTaskChange(ctx, taskID, "comment", "", text)
 	s.invalidateCache(ctx, "tasks:*")
@@ -509,8 +668,23 @@ func (s *TaskService) AddComment(ctx context.Context, taskID uuid.UUID, userID, 
 }
 
 func (s *TaskService) AddAssignee(ctx context.Context, taskID uuid.UUID, userID string) error {
+	var task models.Task
+	if err := s.DB.WithContext(ctx).First(&task, taskID).Error; err != nil {
+		return fmt.Errorf("task not found: %v", err)
+	}
+	var creatorCompanyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", task.CreatedBy).Scan(&creatorCompanyID).Error; err != nil {
+		return fmt.Errorf("failed to get task creator company: %v", err)
+	}
+	var assigneeCompanyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&assigneeCompanyID).Error; err != nil {
+		return fmt.Errorf("assignee not found: %v", err)
+	}
+	if creatorCompanyID != assigneeCompanyID {
+		return fmt.Errorf("cannot assign task to user from different company")
+	}
 	assignee := models.Assignee{UserID: userID}
-	if err := s.DB.WithContext(ctx).Model(&models.Task{ID: taskID}).Association("Assignees").Append(&assignee); err != nil {
+	if err := s.DB.WithContext(ctx).Model(&task).Association("Assignees").Append(&assignee); err != nil {
 		return err
 	}
 	s.logTaskChange(ctx, taskID, "assignee", "", userID)
@@ -596,13 +770,17 @@ func (s *TaskService) CreateTaskWithPrediction(ctx context.Context, userID strin
 		if dueDate, ok := suggestionAction["due_date"].(string); ok && dueDate == "tomorrow" {
 			task.DueDate = time.Now().Add(24 * time.Hour)
 		}
-		if assignee, ok := suggestionAction["assignee"].(string); ok {
+		if assignees, ok := suggestionAction["assignee_ids"].([]interface{}); ok {
+			task.AssigneeIDs = make([]string, len(assignees))
+			for i, a := range assignees {
+				task.AssigneeIDs[i] = a.(string)
+			}
+		} else if assignee, ok := suggestionAction["assignee"].(string); ok {
 			task.AssigneeIDs = []string{assignee}
 		}
 		return s.CreateTask(ctx, userID, task, false)
 	}
 
-	// Если текст пустой, устанавливаем заголовок по умолчанию "Новая задача"
 	if text == "" {
 		text = "Новая задача"
 	}
@@ -819,8 +997,27 @@ func (s *TaskService) BulkAssignTasks(ctx context.Context, userID string, taskID
 	}
 	tx := s.DB.WithContext(ctx).Begin()
 	for _, taskID := range taskIDs {
+		var task models.Task
+		if err := tx.First(&task, taskID).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("task not found: %v", err)
+		}
+		var creatorCompanyID uuid.UUID
+		if err := tx.Raw("SELECT company_id FROM users WHERE user_id = ?", task.CreatedBy).Scan(&creatorCompanyID).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to get creator company: %v", err)
+		}
+		var assigneeCompanyID uuid.UUID
+		if err := tx.Raw("SELECT company_id FROM users WHERE user_id = ?", assigneeID).Scan(&assigneeCompanyID).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("assignee not found: %v", err)
+		}
+		if creatorCompanyID != assigneeCompanyID {
+			tx.Rollback()
+			return fmt.Errorf("cannot assign task to user from different company")
+		}
 		assignee := models.Assignee{UserID: assigneeID}
-		if err := tx.Model(&models.Task{ID: taskID}).Association("Assignees").Append(&assignee); err != nil {
+		if err := tx.Model(&task).Association("Assignees").Append(&assignee); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -893,6 +1090,24 @@ func (s *TaskService) DeleteComment(ctx context.Context, taskID, commentID uuid.
 
 // CreateFinancialEvent создает новое финансовое событие
 func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, event *FinancialEvent) (*FinancialEvent, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := make([]byte, 1024)
+			runtime.Stack(stack, false)
+			log.Printf("Panic in CreateFinancialEvent: %v\nStack: %s", r, stack)
+		}
+	}()
+
+	if event.Title == "" {
+		return nil, fmt.Errorf("title is required")
+	}
+	if event.DueDate.IsZero() {
+		return nil, fmt.Errorf("due date is required")
+	}
+	if event.Amount < 0 {
+		return nil, fmt.Errorf("amount cannot be negative")
+	}
+
 	event.EventID = uuid.New()
 	event.UserID = userID
 	event.CreatedAt = time.Now()
@@ -907,7 +1122,6 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 		return nil, fmt.Errorf("failed to create financial event: %v", err)
 	}
 
-	// Создание события в Google Calendar
 	if s.GoogleCalendar.Client != nil {
 		eventID, err := s.GoogleCalendar.CreateEvent(ctx, event.EventID.String(), event.Title, "", event.DueDate)
 		if err != nil {
@@ -917,7 +1131,6 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 		}
 	}
 
-	// Уведомление через notification-service
 	notification := map[string]interface{}{
 		"user_id":  userID,
 		"channel":  "email",
@@ -925,10 +1138,12 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 		"priority": 5,
 	}
 	notificationJSON, _ := json.Marshal(notification)
-	s.RabbitMQ.Publish("", "notifications", false, false, amqp.Publishing{
+	if err := s.RabbitMQChan.Publish("", "notifications", false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Body:        notificationJSON,
-	})
+	}); err != nil {
+		log.Printf("Failed to publish notification: %v", err)
+	}
 
 	return event, nil
 }
@@ -1285,6 +1500,17 @@ func (s *TaskService) GetAggregatePayroll(ctx context.Context, userID, period st
 
 // Новая функция в task_service.go
 func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]models.Comment, error) {
+	var task models.Task
+	if err := s.DB.WithContext(ctx).First(&task, "id = ?", taskID).Error; err != nil {
+		return nil, fmt.Errorf("task not found: %v", err)
+	}
+	// Проверка доступа (например, пользователь должен быть создателем или исполнителем)
+	userID := ctx.Value("user_id").(string)
+	var isAssignee int64
+	s.DB.WithContext(ctx).Model(&models.Assignee{}).Where("task_id = ? AND user_id = ?", taskID, userID).Count(&isAssignee)
+	if task.CreatedBy != userID && isAssignee == 0 {
+		return nil, fmt.Errorf("permission denied")
+	}
 	var comments []models.Comment
 	if err := s.DB.WithContext(ctx).Where("task_id = ?", taskID).Find(&comments).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch comments: %v", err)
@@ -1293,12 +1519,27 @@ func (s *TaskService) GetTaskComments(ctx context.Context, taskID uuid.UUID) ([]
 }
 
 func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType string, startDate, endDate time.Time) (*models.LeaveRequest, error) {
+	var overlapping int64
+	s.DB.WithContext(ctx).Model(&models.LeaveRequest{}).
+		Where("user_id = ? AND (start_date <= ? AND end_date >= ?)", userID, endDate, startDate).
+		Count(&overlapping)
+	if overlapping > 0 {
+		return nil, fmt.Errorf("leave request overlaps with existing request")
+	}
+
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("failed to get user company: %v", err)
+	}
+
 	request := &models.LeaveRequest{
 		ID:        uuid.New(),
 		UserID:    userID,
 		Type:      leaveType,
 		StartDate: startDate,
 		EndDate:   endDate,
+		Status:    "pending",
+		CompanyID: companyID,
 	}
 	if err := s.DB.Create(request).Error; err != nil {
 		return nil, err
@@ -1308,6 +1549,9 @@ func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType 
 		eventID, err := s.GoogleCalendar.CreateEvent(ctx, request.ID.String(), fmt.Sprintf("%s: %s", leaveType, userID), "", startDate)
 		if err != nil {
 			log.Printf("Ошибка создания события в Google Calendar: %v", err)
+		} else {
+			// Сохраняем eventID в Redis для последующего использования
+			s.Redis.Set(ctx, "calendar_event:leave:"+request.ID.String(), eventID, 0)
 		}
 	}
 
@@ -1316,159 +1560,173 @@ func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType 
 		"type": "notify_user",
 		"data": map[string]interface{}{
 			"user_id":  userID,
-			"message":  fmt.Sprintf("Запрос на %s с %s по %s создан", leaveType, startDate, endDate),
+			"message":  fmt.Sprintf("Запрос на %s с %s по %s создан", leaveType, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")),
 			"priority": 5,
 		},
 	}
 	notificationJSON, _ := json.Marshal(notification)
-	s.RabbitMQChan.Publish("", "notifications_queue", false, false, amqp.Publishing{
+	if err := s.RabbitMQChan.Publish("", "notifications_queue", false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Body:        notificationJSON,
-	})
+	}); err != nil {
+		log.Printf("Ошибка отправки уведомления: %v", err)
+	}
+
 	return request, nil
+}
+
+func (s *TaskService) CreateFollowUpTask(ctx context.Context, userID string, originalTaskID uuid.UUID) (*models.Task, error) {
+	var originalTask models.Task
+	if err := s.DB.WithContext(ctx).First(&originalTask, "id = ?", originalTaskID).Error; err != nil {
+		return nil, fmt.Errorf("original task not found: %v", err)
+	}
+	followUpTask := &models.Task{
+		ID:          uuid.New(),
+		Title:       "Follow-up: " + originalTask.Title,
+		Description: "Следующая задача после " + originalTask.Title,
+		CreatedBy:   userID,
+		CreatedAt:   time.Now(),
+		DueDate:     time.Now().Add(24 * time.Hour),
+		Status:      "pending",
+		Priority:    originalTask.Priority,
+		CompanyID:   originalTask.CompanyID,
+	}
+	return s.CreateTask(ctx, userID, followUpTask, false)
 }
 
 // ConsumeRabbitMQ обрабатывает сообщения из очереди
 func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 	queue, err := s.RabbitMQChan.QueueDeclare("task_queue", true, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Ошибка объявления очереди: %v", err)
+		log.Fatalf("Ошибка объявления очереди task_queue: %v", err)
 	}
-	msgs, err := s.RabbitMQChan.Consume(queue.Name, "", true, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("Ошибка потребления очереди: %v", err)
-	}
-
 	recurringQueue, err := s.RabbitMQChan.QueueDeclare("recurring_tasks", true, false, false, false, nil)
 	if err != nil {
 		log.Fatalf("Ошибка объявления очереди recurring_tasks: %v", err)
 	}
-	recurringMsgs, err := s.RabbitMQChan.Consume(recurringQueue.Name, "", true, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("Ошибка потребления очереди recurring_tasks: %v", err)
+
+	consumeWithRetry := func(queueName string, messages <-chan amqp.Delivery, handler func(amqp.Delivery)) {
+		for msg := range messages {
+			retries := 3
+			for i := 0; i < retries; i++ {
+				err := func() error {
+					defer func() {
+						if r := recover(); r != nil {
+							stack := make([]byte, 1024)
+							runtime.Stack(stack, false)
+							log.Printf("Паника при обработке сообщения из %s: %v\nСтек: %s", queueName, r, stack)
+						}
+					}()
+					handler(msg)
+					return nil
+				}()
+				if err == nil {
+					break
+				}
+				log.Printf("Ошибка обработки сообщения из %s (попытка %d/%d): %v", queueName, i+1, retries, err)
+				time.Sleep(time.Second * time.Duration(i+1))
+			}
+		}
 	}
 
-	go func() {
-		for msg := range msgs {
-			var action map[string]interface{}
-			if err := json.Unmarshal(msg.Body, &action); err != nil {
-				log.Printf("Ошибка разбора сообщения: %v", err)
-				continue
-			}
-			actionType, ok := action["type"].(string)
-			if !ok {
-				log.Printf("Ошибка: тип действия не указан")
-				continue
-			}
-			data, ok := action["data"].(map[string]interface{})
-			if !ok {
-				log.Printf("Ошибка: данные действия не валидны")
-				continue
-			}
+	taskMsgs, err := s.RabbitMQChan.Consume(queue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка потребления из очереди task_queue: %v", err)
+	}
+	go consumeWithRetry(queue.Name, taskMsgs, func(msg amqp.Delivery) {
+		var action map[string]interface{}
+		if err := json.Unmarshal(msg.Body, &action); err != nil {
+			log.Printf("Ошибка разбора сообщения: %v", err)
+			msg.Nack(false, true)
+			return
+		}
+		actionType, ok := action["type"].(string)
+		if !ok {
+			log.Printf("Ошибка: тип действия не указан")
+			msg.Nack(false, true)
+			return
+		}
+		data, ok := action["data"].(map[string]interface{})
+		if !ok {
+			log.Printf("Ошибка: данные действия не валидны")
+			msg.Nack(false, true)
+			return
+		}
 
-			switch actionType {
-			case "start_time_tracking":
-				userID := data["user_id"].(string)
-				taskID := data["task_id"].(string)
-				if _, err := s.StartTimeTracking(ctx, userID, taskID); err != nil {
-					log.Printf("Ошибка старта трекинга: %v", err)
-				}
-			case "stop_time_tracking":
-				entryID := data["entry_id"].(string)
-				if _, err := s.StopTimeTracking(ctx, entryID); err != nil {
-					log.Printf("Ошибка остановки трекинга: %v", err)
-				}
-			case "calculate_payroll":
-				userID := data["user_id"].(string)
-				period := data["period"].(string)
-				if _, err := s.CalculatePayroll(ctx, userID, period); err != nil {
-					log.Printf("Ошибка расчета зарплаты: %v", err)
-				}
-			case "create_onboarding":
-				userID := data["user_id"].(string)
-				if err := s.CreateOnboardingChecklist(ctx, userID); err != nil {
-					log.Printf("Ошибка создания онбординга: %v", err)
-				}
-			case "create_onboarding_tasks":
-				userID := data["user_id"].(string)
-				companyType := data["company_type"].(string)
-				if err := s.CreateOnboardingTasks(ctx, userID, companyType); err != nil {
-					log.Printf("Ошибка создания онбординг-задач: %v", err)
-				}
-			case "create_leave_request":
-				userID := data["user_id"].(string)
-				leaveType := data["leave_type"].(string)
-				startDateStr, _ := data["start_date"].(string)
-				endDateStr, _ := data["end_date"].(string)
-				startDate, err := time.Parse(time.RFC3339, startDateStr)
-				if err != nil {
-					log.Printf("Ошибка парсинга start_date: %v", err)
-					continue
-				}
-				endDate, err := time.Parse(time.RFC3339, endDateStr)
-				if err != nil {
-					log.Printf("Ошибка парсинга end_date: %v", err)
-					continue
-				}
-				if _, err := s.CreateLeaveRequest(ctx, userID, leaveType, startDate, endDate); err != nil {
-					log.Printf("Ошибка создания запроса на отпуск: %v", err)
-				}
+		switch actionType {
+		case "start_time_tracking":
+			userID, _ := data["user_id"].(string)
+			taskID, _ := data["task_id"].(string)
+			if _, err := s.StartTimeTracking(ctx, userID, taskID); err != nil {
+				log.Printf("Ошибка старта трекинга: %v", err)
+				msg.Nack(false, true)
+				return
+			}
+		default:
+			log.Printf("Неизвестный тип действия: %s", actionType)
+			msg.Nack(false, true)
+			return
+		}
+		msg.Ack(false)
+	})
+
+	recurringMsgs, err := s.RabbitMQChan.Consume(recurringQueue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Ошибка потребления из очереди recurring_tasks: %v", err)
+	}
+	go consumeWithRetry(recurringQueue.Name, recurringMsgs, func(msg amqp.Delivery) {
+		var job map[string]interface{}
+		if err := json.Unmarshal(msg.Body, &job); err != nil {
+			log.Printf("Ошибка разбора сообщения recurring_tasks: %v", err)
+			msg.Nack(false, true)
+			return
+		}
+		if jobType, ok := job["type"].(string); ok && jobType == "create_recurring_task" {
+			interval, _ := job["interval"].(string)
+			untilStr, _ := job["until"].(string)
+			until, err := time.Parse(time.RFC3339, untilStr)
+			if err != nil {
+				log.Printf("Ошибка парсинга until: %v", err)
+				msg.Nack(false, true)
+				return
+			}
+			nextDue := time.Now()
+			switch interval {
+			case "daily":
+				nextDue = nextDue.Add(24 * time.Hour)
+			case "weekly":
+				nextDue = nextDue.Add(7 * 24 * time.Hour)
+			case "monthly":
+				nextDue = nextDue.AddDate(0, 1, 0)
 			default:
-				log.Printf("Неизвестный тип действия: %s", actionType)
+				log.Printf("Неподдерживаемый интервал: %s", interval)
+				msg.Nack(false, true)
+				return
 			}
-		}
-	}()
-	go func() {
-		for msg := range recurringMsgs {
-			var job map[string]interface{}
-			if err := json.Unmarshal(msg.Body, &job); err != nil {
-				log.Printf("Ошибка разбора сообщения recurring_tasks: %v", err)
-				continue
-			}
-			if job["type"] == "create_recurring_task" {
-				interval := job["interval"].(string)
-				until, _ := time.Parse(time.RFC3339, job["until"].(string))
-				nextDue := time.Now()
-				switch interval {
-				case "daily":
-					nextDue = nextDue.Add(24 * time.Hour)
-				case "weekly":
-					nextDue = nextDue.Add(7 * 24 * time.Hour)
-				case "monthly":
-					nextDue = nextDue.AddDate(0, 1, 0)
-				default:
-					log.Printf("Неподдерживаемый интервал: %s", interval)
-					continue
+			if nextDue.Before(until) {
+				newTask := &models.Task{
+					ID:          uuid.New(),
+					Title:       job["title"].(string),
+					Description: job["description"].(string),
+					DueDate:     nextDue,
+					CreatedBy:   job["user_id"].(string),
+					CreatedAt:   time.Now(),
+					Status:      "pending",
+					Priority:    int(job["priority"].(float64)),
 				}
-				if nextDue.Before(until) {
-					newTask := &models.Task{
-						ID:          uuid.New(),
-						Title:       job["title"].(string),
-						Description: job["description"].(string),
-						DueDate:     nextDue,
-						CreatedBy:   job["user_id"].(string),
-						CreatedAt:   time.Now(),
-						Status:      "pending",
-						Priority:    int(job["priority"].(float64)),
-					}
-					if _, err := s.CreateTask(ctx, job["user_id"].(string), newTask, true); err != nil {
-						log.Printf("Ошибка создания повторяющейся задачи: %v", err)
-						continue
-					}
-					// Перепостановка задачи в очередь
-					s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
-						ContentType: "application/json",
-						Body:        msg.Body,
-					})
-					time.Sleep(1 * time.Second) // Задержка перед повторной отправкой
-					if err := s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
-						ContentType: "application/json",
-						Body:        msg.Body,
-					}); err != nil {
-						log.Printf("Ошибка повторной отправки в recurring_tasks: %v", err)
-					}
+				if _, err := s.CreateTask(ctx, job["user_id"].(string), newTask, true); err != nil {
+					log.Printf("Ошибка создания повторяющейся задачи: %v", err)
+					msg.Nack(false, true)
+					return
+				}
+				if err := s.RabbitMQChan.Publish("", "recurring_tasks", false, false, amqp.Publishing{
+					ContentType: "application/json",
+					Body:        msg.Body,
+				}); err != nil {
+					log.Printf("Ошибка повторной отправки: %v", err)
 				}
 			}
 		}
-	}()
+		msg.Ack(false)
+	})
 }

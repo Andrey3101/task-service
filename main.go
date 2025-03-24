@@ -320,7 +320,7 @@ func main() {
 		api.POST("/onboarding", taskHandler.CreateOnboardingChecklist)
 		api.POST("/leave/request", taskHandler.CreateLeaveRequest)
 		api.GET("/time/active", taskHandler.GetActiveTimeEntries)
-		api.GET("/time/total", taskHandler.GetTotalActiveTime)
+		api.GET("/time/total", taskHandler.CalculateTotalActiveTime)
 		api.GET("/payroll/aggregate", taskHandler.GetAggregatePayroll)
 		api.POST("/recurring", taskHandler.CreateRecurringTask)
 		api.GET("/productivity", taskHandler.GetProductivityReport)

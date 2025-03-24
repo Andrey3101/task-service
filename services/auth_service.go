@@ -42,6 +42,10 @@ func (s *AuthService) rotateKeys() {
 		s.CurrentSecret = fmt.Sprintf("%s-%d", s.Config.JWTSecret, time.Now().Unix())
 		log.Printf("JWT Secret rotated")
 	}
+	s.Redis.Set(context.Background(), "jwt_current_secret", s.CurrentSecret, 0)
+	if s.OldSecret != "" {
+		s.Redis.Set(context.Background(), "jwt_old_secret", s.OldSecret, time.Duration(s.Config.JWTRotationInterval)*time.Second)
+	}
 }
 
 type Claims struct {
@@ -90,6 +94,13 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 			s.RoleCache.Store(claims.UserID, claims.Role)
 			return claims, nil
 		}
+	}
+	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		if claims.ExpiresAt.Before(time.Now()) {
+			return nil, fmt.Errorf("token expired")
+		}
+		s.RoleCache.Store(claims.UserID, claims.Role)
+		return claims, nil
 	}
 
 	if s.OldSecret != "" {

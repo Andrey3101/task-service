@@ -58,7 +58,6 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 		return
 	}
 
-	// Добавляем валидацию поля Title
 	if taskInput.Title == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": title is required"})
 		return
@@ -68,17 +67,12 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	taskInput.ID = uuid.New()
 	taskInput.CreatedAt = time.Now()
 	taskInput.Status = "pending"
+	taskInput.AssigneeIDs = taskInput.AssigneeIDs
 
-	task, err := h.Service.CreateTask(c.Request.Context(), userID, &taskInput.Task, len(taskInput.AssigneeIDs) == 0)
+	task, err := h.Service.CreateTask(c.Request.Context(), userID, &taskInput.Task, false)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
-	}
-	for _, assigneeID := range taskInput.AssigneeIDs {
-		if err := h.Service.AddAssignee(c.Request.Context(), task.ID, assigneeID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
-			return
-		}
 	}
 	c.JSON(http.StatusCreated, task)
 }
@@ -160,7 +154,7 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 	dueDateStr := c.Query("due_date")
 	priority := c.Query("priority")
 	assigneeID := c.Query("assignee_id")
-	fields := c.Query("fields") // Новый параметр
+	fields := c.Query("fields")
 	limit, _ := c.GetQuery("limit")
 	offset, _ := c.GetQuery("offset")
 
@@ -180,7 +174,7 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 
 	tasks, total, err := h.Service.GetTasks(c.Request.Context(), status, dueDate, priority, assigneeID, fields, lim, off)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": total})
@@ -208,12 +202,8 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 	}
 
 	var taskInput struct {
-		Title       string    `json:"title" binding:"max=255"`
-		Description string    `json:"description" binding:"max=1000"`
-		Status      string    `json:"status" binding:"oneof=pending in_progress completed"`
-		DueDate     time.Time `json:"due_date"`
-		Priority    int       `json:"priority"`
-		AssigneeIDs []string  `json:"assignee_ids"`
+		models.Task
+		AssigneeIDs []string `json:"assignee_ids"`
 	}
 	if err := c.ShouldBindJSON(&taskInput); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
@@ -222,38 +212,24 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 
 	userID := c.GetString("user_id")
 	role := c.GetString("role")
-	// Исправлено: GetTask возвращает *models.Task и error
 	task, err := h.Service.GetTask(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": h.getErrorMessage("task_not_found")})
 		return
 	}
-
-	// Убрано шардирование, проверка прав доступа упрощена
-	if role != "super_admin" && ((role == "admin" || role == "manager") && task.CreatedBy != userID) {
+	var isAssignee int64
+	h.Service.DB.WithContext(c.Request.Context()).Model(&models.Assignee{}).Where("task_id = ? AND user_id = ?", id, userID).Count(&isAssignee)
+	if role != "super_admin" && ((role == "admin" || role == "manager") && task.CreatedBy != userID && isAssignee == 0) {
 		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("permission_denied")})
 		return
 	}
 
-	updatedTask := models.Task{
-		ID:          id,
-		Title:       taskInput.Title,
-		Description: taskInput.Description,
-		Status:      taskInput.Status,
-		DueDate:     taskInput.DueDate,
-		Priority:    taskInput.Priority,
-	}
-	task, err = h.Service.UpdateTask(c.Request.Context(), userID, &updatedTask)
+	taskInput.ID = id
+	taskInput.AssigneeIDs = taskInput.AssigneeIDs
+	task, err = h.Service.UpdateTask(c.Request.Context(), userID, &taskInput.Task)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
-	}
-
-	for _, assigneeID := range taskInput.AssigneeIDs {
-		if err := h.Service.AddAssignee(c.Request.Context(), id, assigneeID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
-			return
-		}
 	}
 	c.JSON(http.StatusOK, task)
 }
@@ -392,7 +368,7 @@ func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
 
 	task, err := h.Service.CreateTaskWithPrediction(c.Request.Context(), userID, req.Text, req.ConfirmSuggestion, req.SuggestionAction)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, task)
@@ -736,6 +712,24 @@ func (h *TaskHandler) GetActiveTimeEntries(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, entries)
+}
+
+// CalculateTotalActiveTime godoc
+// @Summary Calculate total active time for a user
+// @Description Calculate total active time in minutes for the current user
+// @Tags time_tracking
+// @Produce json
+// @Success 200 {object} map[string]int "total_minutes response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/time/total [get]
+func (h *TaskHandler) CalculateTotalActiveTime(c *gin.Context) {
+	userID := c.GetString("user_id")
+	totalMinutes, err := h.Service.CalculateTotalActiveTime(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"total_minutes": totalMinutes})
 }
 
 // GetTotalActiveTime godoc
