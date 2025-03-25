@@ -18,13 +18,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// Константы
-const (
-	BlacklistTTL  = 24 * time.Hour
-	RoleCacheTTL  = 1 * time.Hour
-	EncryptionKey = "32-byte-long-secret-key-for-aes!" // Должно быть задано в конфиге
-)
-
 // AuthService - сервис аутентификации
 type AuthService struct {
 	Config        config.Config
@@ -61,7 +54,7 @@ func NewAuthService(cfg config.Config, redisClient *redis.Client, db *gorm.DB) (
 
 // encryptSecret - шифрование секрета перед сохранением в Redis
 func (s *AuthService) encryptSecret(secret string) string {
-	block, err := aes.NewCipher([]byte(EncryptionKey))
+	block, err := aes.NewCipher([]byte(s.Config.JWTEncryptionKey))
 	if err != nil {
 		s.Logger.Error("Failed to create AES cipher", zap.Error(err))
 		return secret // fallback без шифрования
@@ -88,7 +81,7 @@ func (s *AuthService) decryptSecret(encoded string) string {
 		return s.Config.JWTSecret // fallback на дефолтный секрет
 	}
 
-	block, err := aes.NewCipher([]byte(EncryptionKey))
+	block, err := aes.NewCipher([]byte(s.Config.JWTEncryptionKey))
 	if err != nil {
 		s.Logger.Error("Failed to create AES cipher", zap.Error(err))
 		return s.Config.JWTSecret
@@ -165,7 +158,7 @@ func (s *AuthService) GenerateToken(userID string, role string, companyID uuid.U
 	}
 
 	// Кэширование роли в Redis
-	s.Redis.Set(context.Background(), "role:"+userID, role, RoleCacheTTL)
+	s.Redis.Set(context.Background(), "role:"+userID, role, s.Config.RoleCacheTTL)
 	return signedToken, nil
 }
 
@@ -185,7 +178,7 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 			if claims.ExpiresAt.Before(time.Now()) {
 				return nil, fmt.Errorf("token expired")
 			}
-			s.Redis.Set(context.Background(), "role:"+claims.UserID, claims.Role, RoleCacheTTL)
+			s.Redis.Set(context.Background(), "role:"+claims.UserID, claims.Role, s.Config.RoleCacheTTL)
 			return claims, nil
 		}
 	}
@@ -200,7 +193,7 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 				if claims.ExpiresAt.Before(time.Now()) {
 					return nil, fmt.Errorf("token expired")
 				}
-				s.Redis.Set(context.Background(), "role:"+claims.UserID, claims.Role, RoleCacheTTL)
+				s.Redis.Set(context.Background(), "role:"+claims.UserID, claims.Role, s.Config.RoleCacheTTL)
 				return claims, nil
 			}
 		}
@@ -211,7 +204,7 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 
 // BlacklistToken - добавление токена в blacklist
 func (s *AuthService) BlacklistToken(tokenString string) error {
-	err := s.Redis.Set(context.Background(), "blacklist:"+tokenString, "true", BlacklistTTL).Err()
+	err := s.Redis.Set(context.Background(), "blacklist:"+tokenString, "true", s.Config.BlacklistTTL).Err()
 	if err != nil {
 		s.Logger.Error("Failed to blacklist token", zap.Error(err))
 	}
@@ -234,7 +227,7 @@ func (s *AuthService) GetRole(userID string) (string, bool) {
 	}
 
 	// Кэширование в Redis
-	s.Redis.Set(context.Background(), "role:"+userID, role, RoleCacheTTL)
+	s.Redis.Set(context.Background(), "role:"+userID, role, s.Config.RoleCacheTTL)
 	return role, true
 }
 
@@ -276,7 +269,7 @@ func (s *AuthService) CreateUser(ctx context.Context, creatorID, newUserID, role
 
 	err := s.DB.WithContext(ctx).Table("users").Create(&newUser).Error
 	if err == nil {
-		s.Redis.Set(ctx, "role:"+newUserID, role, RoleCacheTTL)
+		s.Redis.Set(ctx, "role:"+newUserID, role, s.Config.RoleCacheTTL)
 	}
 	return err
 }
@@ -299,7 +292,7 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, updaterID, targetUserI
 
 	err := s.DB.WithContext(ctx).Exec("UPDATE users SET role = ? WHERE user_id = ?", newRole, targetUserID).Error
 	if err == nil {
-		s.Redis.Set(ctx, "role:"+targetUserID, newRole, RoleCacheTTL)
+		s.Redis.Set(ctx, "role:"+targetUserID, newRole, s.Config.RoleCacheTTL)
 	}
 	return err
 }

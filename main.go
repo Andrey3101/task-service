@@ -39,8 +39,8 @@ const (
 
 // App - структура для хранения зависимостей приложения
 type App struct {
-	DBConn       *sql.DB  // Изменено с *gorm.DB на *sql.DB для закрытия соединения
-	DB           *gorm.DB // Оставляем для работы с GORM
+	DBConn       *sql.DB
+	DB           *gorm.DB
 	Redis        *redis.Client
 	RabbitMQ     *amqp.Connection
 	RabbitMQChan *amqp.Channel
