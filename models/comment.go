@@ -1,4 +1,3 @@
-// models/comment.go
 package models
 
 import (
