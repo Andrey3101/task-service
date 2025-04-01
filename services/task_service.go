@@ -49,9 +49,17 @@ type Report struct {
 }
 
 type Dashboard struct {
-	EmployeeLoad []EmployeeLoad `json:"employee_load"`
-	TaskCount    int            `json:"task_count"`
-	OverdueTasks int            `json:"overdue_tasks"`
+	EmployeeLoad       []EmployeeLoad `json:"employee_load"`
+	TaskCount          int            `json:"task_count"`
+	OverdueTasks       int            `json:"overdue_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	NewClients         int            `json:"new_clients"`
+	TotalAmount        float64        `json:"total_amount"`
+	Productivity       float64        `json:"productivity"`
+	TasksChange        float64        `json:"tasks_change"`
+	ClientsChange      float64        `json:"clients_change"`
+	AmountChange       float64        `json:"amount_change"`
+	ProductivityChange float64        `json:"productivity_change"`
 }
 
 type EmployeeLoad struct {
@@ -891,21 +899,22 @@ func (s *TaskService) GetTaskStats(ctx context.Context, userID, status, period s
 }
 
 func (s *TaskService) GetDashboard(ctx context.Context, userID string, filters map[string]string) (*Dashboard, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %v", err)
+	}
 	var role string
 	if err := s.DB.WithContext(ctx).Raw("SELECT role FROM users WHERE user_id = ?", userID).Scan(&role).Error; err != nil {
 		return nil, fmt.Errorf("user not found: %v", err)
 	}
-	if role != "admin" {
-		return nil, fmt.Errorf("only admins can view dashboard")
+	if role != "admin" && role != "manager" {
+		return nil, fmt.Errorf("permission denied")
 	}
-	var companyID uuid.UUID
-	s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID)
 
-	query := s.DB.WithContext(ctx).Model(&models.Task{}).Where("created_by IN (SELECT user_id FROM users WHERE company_id = ?)", companyID)
+	query := s.DB.WithContext(ctx).Where("company_id = ?", companyID)
 	if date, ok := filters["date"]; ok {
-		start, _ := time.Parse("2006-01-02", date)
-		end := start.Add(24*time.Hour - time.Second)
-		query = query.Where("created_at BETWEEN ? AND ?", start, end)
+		parsedDate, _ := time.Parse("2006-01-02", date)
+		query = query.Where("due_date BETWEEN ? AND ?", parsedDate, parsedDate.Add(24*time.Hour))
 	}
 	if status, ok := filters["status"]; ok {
 		query = query.Where("status = ?", status)
@@ -914,32 +923,49 @@ func (s *TaskService) GetDashboard(ctx context.Context, userID string, filters m
 		query = query.Where("id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)", userIDFilter)
 	}
 
-	var taskCount int64
-	if err := query.Count(&taskCount).Error; err != nil {
+	var tasks []models.Task
+	if err := query.Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 
-	var overdueTasks int64
-	overdueQuery := s.DB.WithContext(ctx).Model(&models.Task{}).Where("due_date < ? AND status != 'completed' AND created_by IN (SELECT user_id FROM users WHERE company_id = ?)", time.Now(), companyID)
-	if err := overdueQuery.Count(&overdueTasks).Error; err != nil {
-		return nil, err
+	employeeLoad := make(map[string]EmployeeLoad)
+	completedTasks := 0
+	overdueTasks := 0
+	now := time.Now()
+	for _, task := range tasks {
+		if task.Status == "completed" {
+			completedTasks++
+		}
+		if task.DueDate.Before(now) && task.Status != "completed" {
+			overdueTasks++
+		}
+		for _, assignee := range task.Assignees {
+			load := employeeLoad[assignee.UserID]
+			load.UserID = assignee.UserID
+			load.TaskCount++
+			load.TotalPriority += task.Priority
+			employeeLoad[assignee.UserID] = load
+		}
 	}
 
-	var employeeLoad []EmployeeLoad
-	loadQuery := `
-        SELECT u.user_id, COUNT(ta.task_id) as task_count, COALESCE(SUM(t.priority), 0) as total_priority
-        FROM users u
-        LEFT JOIN task_assignees ta ON u.user_id = ta.user_id
-        LEFT JOIN tasks t ON ta.task_id = t.id
-        WHERE u.company_id = ? AND u.role = 'user'
-        GROUP BY u.user_id
-    `
-	s.DB.WithContext(ctx).Raw(loadQuery, companyID).Scan(&employeeLoad)
+	// Преобразование значений карты в срез вручную
+	employeeLoadSlice := make([]EmployeeLoad, 0, len(employeeLoad))
+	for _, value := range employeeLoad {
+		employeeLoadSlice = append(employeeLoadSlice, value)
+	}
 
 	return &Dashboard{
-		EmployeeLoad: employeeLoad,
-		TaskCount:    int(taskCount),
-		OverdueTasks: int(overdueTasks),
+		EmployeeLoad:       employeeLoadSlice,
+		TaskCount:          len(tasks),
+		OverdueTasks:       overdueTasks,
+		CompletedTasks:     completedTasks,
+		NewClients:         0, // Здесь нужно добавить логику подсчёта новых клиентов
+		TotalAmount:        0, // Добавить логику для суммы
+		Productivity:       0, // Добавить расчёт продуктивности
+		TasksChange:        0, // Добавить расчёт изменений
+		ClientsChange:      0,
+		AmountChange:       0,
+		ProductivityChange: 0,
 	}, nil
 }
 
