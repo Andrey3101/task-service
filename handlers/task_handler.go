@@ -24,17 +24,18 @@ func NewTaskHandler(service *services.TaskService, cfg config.Config) *TaskHandl
 
 func (h *TaskHandler) getErrorMessage(key string) string {
 	messages := map[string]map[string]string{
-		"invalid_input":     {"en": "Invalid input", "ru": "Неверный ввод"},
-		"permission_denied": {"en": "Permission denied", "ru": "Доступ запрещен"},
-		"task_not_found":    {"en": "Task not found", "ru": "Задача не найдена"},
-		"server_error":      {"en": "Server error", "ru": "Ошибка сервера"},
-		"user_not_found":    {"en": "User not found", "ru": "Пользователь не найден"},
+		"invalid_input":        {"en": "Invalid input", "ru": "Неверный ввод"},
+		"permission_denied":    {"en": "Permission denied", "ru": "Доступ запрещен"},
+		"task_not_found":       {"en": "Task not found", "ru": "Задача не найдена"},
+		"server_error":         {"en": "Server error", "ru": "Ошибка сервера"},
+		"user_not_found":       {"en": "User not found", "ru": "Пользователь не найден"},
+		"subscription_invalid": {"en": "Cannot create task: trial ended or subscription unpaid", "ru": "Невозможно создать задачу: пробный период закончился или подписка не оплачена"},
 	}
 	lang := h.Config.Language
 	if msg, ok := messages[key][lang]; ok {
 		return msg
 	}
-	return messages[key]["en"] // По умолчанию английский
+	return messages[key]["en"] // Default to English
 }
 
 // CreateTask godoc
@@ -46,6 +47,7 @@ func (h *TaskHandler) getErrorMessage(key string) string {
 // @Param task body object true "Task data" {"title": "string", "description": "string", "status": "string", "due_date": "string", "priority": "int", "assignee_ids": ["string"]}
 // @Success 201 {object} models.Task
 // @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/create [post]
 func (h *TaskHandler) CreateTask(c *gin.Context) {
@@ -64,12 +66,66 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	}
 
 	userID := c.GetString("user_id")
+	// Check subscription status
+	isValid, err := h.Service.CheckSubscriptionStatus(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	if !isValid {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("subscription_invalid")})
+		return
+	}
+
 	taskInput.ID = uuid.New()
 	taskInput.CreatedAt = time.Now()
 	taskInput.Status = "pending"
 	taskInput.Task.AssigneeIDs = taskInput.AssigneeIDs
 
 	task, err := h.Service.CreateTask(c.Request.Context(), userID, &taskInput.Task, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, task)
+}
+
+// CreateTaskWithPrediction godoc
+// @Summary Create a task with predictive input
+// @Description Create a task based on text with predictive suggestions
+// @Tags tasks
+// @Accept json
+// @Produce json
+// @Param request body object true "Task creation request" {"text": "string", "confirm_suggestion": "bool", "suggestion_action": "object"}
+// @Success 201 {object} models.Task
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
+// @Failure 500 {object} map[string]string "error response"
+// @Router /tasks/create/predictive [post]
+func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var req struct {
+		Text              string                 `json:"text"`
+		ConfirmSuggestion bool                   `json:"confirm_suggestion"`
+		SuggestionAction  map[string]interface{} `json:"suggestion_action"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
+		return
+	}
+
+	// Check subscription status
+	isValid, err := h.Service.CheckSubscriptionStatus(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
+		return
+	}
+	if !isValid {
+		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("subscription_invalid")})
+		return
+	}
+
+	task, err := h.Service.CreateTaskWithPrediction(c.Request.Context(), userID, req.Text, req.ConfirmSuggestion, req.SuggestionAction)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
@@ -342,37 +398,6 @@ func (h *TaskHandler) GetReports(c *gin.Context) {
 	c.JSON(http.StatusOK, reports)
 }
 
-// CreateTaskWithPrediction godoc
-// @Summary Create a task with predictive input
-// @Description Create a task based on text with predictive suggestions
-// @Tags tasks
-// @Accept json
-// @Produce json
-// @Param request body object true "Task creation request" {"text": "string", "confirm_suggestion": "bool", "suggestion_action": "object"}
-// @Success 201 {object} models.Task
-// @Failure 400 {object} map[string]string "error response"
-// @Failure 500 {object} map[string]string "error response"
-// @Router /tasks/create/predictive [post]
-func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
-	userID := c.GetString("user_id")
-	var req struct {
-		Text              string                 `json:"text"`
-		ConfirmSuggestion bool                   `json:"confirm_suggestion"`
-		SuggestionAction  map[string]interface{} `json:"suggestion_action"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
-		return
-	}
-
-	task, err := h.Service.CreateTaskWithPrediction(c.Request.Context(), userID, req.Text, req.ConfirmSuggestion, req.SuggestionAction)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, task)
-}
-
 // GetDashboard godoc
 // @Summary Get admin dashboard
 // @Description Retrieve dashboard data with filters
@@ -459,7 +484,7 @@ func (h *TaskHandler) GenerateQuickReport(c *gin.Context) {
 	userID := c.GetString("user_id")
 	period := c.Query("period")
 	if period == "" {
-		period = "week" // По умолчанию за неделю
+		period = "week" // Default to week
 	}
 	report, err := h.Service.GenerateReport(c.Request.Context(), userID, period)
 	if err != nil {

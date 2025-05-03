@@ -92,6 +92,12 @@ type FinancialEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// isValidStatus проверяет, является ли статус задачи допустимым
+func isValidStatus(status string) bool {
+	validStatuses := map[string]bool{"pending": true, "in_progress": true, "completed": true}
+	return validStatuses[status]
+}
+
 func (s *TaskService) GetSalesAnalytics(ctx context.Context, userID string, period string) (*SalesAnalytics, error) {
 	var companyID uuid.UUID
 	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
@@ -178,6 +184,35 @@ func (s *TaskService) Close() {
 	}
 }
 
+// hasActiveSubscription проверяет, есть ли активная подписка у пользователя или компании
+func (s *TaskService) hasActiveSubscription(ctx context.Context, userID string) (bool, error) {
+	var companyID uuid.UUID
+	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
+		return false, fmt.Errorf("failed to get user company: %v", err)
+	}
+
+	cacheKey := fmt.Sprintf("subscription:%s", companyID.String())
+	if cached, err := s.Redis.Get(ctx, cacheKey).Result(); err == nil && cached == "active" {
+		return true, nil
+	}
+
+	var subscription models.Subscription
+	err := s.DB.WithContext(ctx).
+		Where("company_id = ? AND status = ? AND expires_at > ?", companyID, "active", time.Now()).
+		First(&subscription).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			s.Redis.Set(ctx, cacheKey, "inactive", 10*time.Minute)
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check subscription: %v", err)
+	}
+
+	s.Redis.Set(ctx, cacheKey, "active", 10*time.Minute)
+	return true, nil
+}
+
+// CreateTask создаёт новую задачу с проверкой подписки
 func (s *TaskService) CreateTask(ctx context.Context, userID string, task *models.Task, autoAssign bool) (*models.Task, error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -186,6 +221,14 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 			log.Printf("Паника в CreateTask: %v\nСтек: %s", r, stack)
 		}
 	}()
+
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSubscription {
+		return nil, fmt.Errorf("active subscription required to create tasks")
+	}
 
 	if task.Title == "" {
 		return nil, fmt.Errorf("title is required")
@@ -206,7 +249,6 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 		task.Priority = 1
 	}
 
-	// Преобразование AssigneeIDs в Assignees
 	if len(task.AssigneeIDs) > 0 {
 		task.Assignees = make([]models.Assignee, len(task.AssigneeIDs))
 		for i, id := range task.AssigneeIDs {
@@ -255,12 +297,6 @@ func (s *TaskService) CreateTask(ctx context.Context, userID string, task *model
 	return task, nil
 }
 
-// Вспомогательные функции
-func isValidStatus(status string) bool {
-	validStatuses := map[string]bool{"pending": true, "in_progress": true, "completed": true}
-	return validStatuses[status]
-}
-
 func publishToRabbitMQ(ch *amqp.Channel, queue string, data interface{}) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
@@ -282,9 +318,17 @@ func publishTaskUpdate(redisClient *redis.Client, taskID, action string, created
 	redisClient.Publish(context.Background(), "task_updates", eventJSON)
 }
 
-// CreateRecurringTask создаёт задачу с повторением
+// CreateRecurringTask создаёт задачу с повторением с проверкой подписки
 func (s *TaskService) CreateRecurringTask(ctx context.Context, userID string, task *models.Task, recurrence *Recurrence) (*models.Task, error) {
-	task, err := s.CreateTask(ctx, userID, task, true)
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSubscription {
+		return nil, fmt.Errorf("active subscription required to create recurring tasks")
+	}
+
+	task, err = s.CreateTask(ctx, userID, task, true)
 	if err != nil {
 		return nil, err
 	}
@@ -369,8 +413,16 @@ func (s *TaskService) GetProductivityReport(ctx context.Context, userID, period 
 	return report, nil
 }
 
-// CreateTaxReminders создаёт напоминания о налогах и отчётах
+// / CreateTaxReminders создаёт напоминания о налогах и отчётах с проверкой подписки
 func (s *TaskService) CreateTaxReminders(ctx context.Context, userID, companyType string) error {
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !hasSubscription {
+		return fmt.Errorf("active subscription required to create tax reminders")
+	}
+
 	taxDates := map[string][]struct {
 		Title   string
 		DueDate time.Time
@@ -399,7 +451,7 @@ func (s *TaskService) CreateTaxReminders(ctx context.Context, userID, companyTyp
 			CreatedAt: time.Now(),
 			DueDate:   reminder.DueDate,
 			Status:    "pending",
-			Priority:  2, // Средний приоритет
+			Priority:  2,
 		}
 		if _, err := s.CreateTask(ctx, userID, task, true); err != nil {
 			log.Printf("Ошибка создания задачи напоминания о налогах: %v", err)
@@ -776,7 +828,16 @@ func (s *TaskService) GetReports(ctx context.Context, userID string) ([]Report, 
 	return reports, nil
 }
 
+// CreateTaskWithPrediction создаёт задачу с предсказанием и проверкой подписки
 func (s *TaskService) CreateTaskWithPrediction(ctx context.Context, userID string, text string, confirmSuggestion bool, suggestionAction map[string]interface{}) (*models.Task, error) {
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSubscription {
+		return nil, fmt.Errorf("active subscription required to create tasks with prediction")
+	}
+
 	if confirmSuggestion && suggestionAction != nil {
 		task := &models.Task{
 			ID:        uuid.New(),
@@ -1133,15 +1194,23 @@ func (s *TaskService) DeleteComment(ctx context.Context, taskID, commentID uuid.
 	return nil
 }
 
-// CreateFinancialEvent создает новое финансовое событие
+// CreateFinancialEvent создаёт новое финансовое событие с проверкой подписки
 func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, event *FinancialEvent) (*FinancialEvent, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := make([]byte, 1024)
 			runtime.Stack(stack, false)
-			log.Printf("Panic in CreateFinancialEvent: %v\nStack: %s", r, stack)
+			log.Printf("Паника в CreateFinancialEvent: %v\nСтек: %s", r, stack)
 		}
 	}()
+
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSubscription {
+		return nil, fmt.Errorf("active subscription required to create financial events")
+	}
 
 	if event.Title == "" {
 		return nil, fmt.Errorf("title is required")
@@ -1170,7 +1239,7 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 	if s.GoogleCalendar.Client != nil {
 		eventID, err := s.GoogleCalendar.CreateEvent(ctx, event.EventID.String(), event.Title, "", event.DueDate)
 		if err != nil {
-			log.Printf("Failed to create Google Calendar event: %v", err)
+			log.Printf("Ошибка создания события в Google Calendar: %v", err)
 		} else {
 			s.Redis.Set(ctx, "calendar_event:financial:"+event.EventID.String(), eventID, 0)
 		}
@@ -1179,7 +1248,7 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 	notification := map[string]interface{}{
 		"user_id":  userID,
 		"channel":  "email",
-		"message":  fmt.Sprintf("Financial event '%s' scheduled for %s", event.Title, event.DueDate.Format("2006-01-02")),
+		"message":  fmt.Sprintf("Финансовое событие '%s' запланировано на %s", event.Title, event.DueDate.Format("2006-01-02")),
 		"priority": 5,
 	}
 	notificationJSON, _ := json.Marshal(notification)
@@ -1187,7 +1256,7 @@ func (s *TaskService) CreateFinancialEvent(ctx context.Context, userID string, e
 		ContentType: "application/json",
 		Body:        notificationJSON,
 	}); err != nil {
-		log.Printf("Failed to publish notification: %v", err)
+		log.Printf("Ошибка отправки уведомления: %v", err)
 	}
 
 	return event, nil
@@ -1289,7 +1358,16 @@ func (s *TaskService) CalculateTotalActiveTime(ctx context.Context, userID strin
 	return totalMinutes, nil
 }
 
+// CreateOnboardingTasks создаёт онбординг-задачи с проверкой подписки
 func (s *TaskService) CreateOnboardingTasks(ctx context.Context, userID, companyType string) error {
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !hasSubscription {
+		return fmt.Errorf("active subscription required to create onboarding tasks")
+	}
+
 	var companyID uuid.UUID
 	if err := s.DB.WithContext(ctx).Raw("SELECT company_id FROM users WHERE user_id = ?", userID).Scan(&companyID).Error; err != nil {
 		return fmt.Errorf("user not found: %v", err)
@@ -1329,7 +1407,6 @@ func (s *TaskService) CreateOnboardingTasks(ctx context.Context, userID, company
 			return err
 		}
 
-		// Интеграция с Google Calendar, если настроена
 		if s.GoogleCalendar.Client != nil {
 			eventID, err := s.GoogleCalendar.CreateEvent(ctx, newTask.ID.String(), newTask.Title, newTask.Description, newTask.DueDate)
 			if err != nil {
@@ -1339,7 +1416,6 @@ func (s *TaskService) CreateOnboardingTasks(ctx context.Context, userID, company
 			}
 		}
 
-		// Уведомление через RabbitMQ
 		notification := map[string]interface{}{
 			"type": "notify_user",
 			"data": map[string]interface{}{
@@ -1646,7 +1722,16 @@ func (s *TaskService) CreateLeaveRequest(ctx context.Context, userID, leaveType 
 	return request, nil
 }
 
+// CreateFollowUpTask создаёт последующую задачу с проверкой подписки
 func (s *TaskService) CreateFollowUpTask(ctx context.Context, userID string, originalTaskID uuid.UUID) (*models.Task, error) {
+	hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSubscription {
+		return nil, fmt.Errorf("active subscription required to create follow-up tasks")
+	}
+
 	var originalTask models.Task
 	if err := s.DB.WithContext(ctx).First(&originalTask, "id = ?", originalTaskID).Error; err != nil {
 		return nil, fmt.Errorf("original task not found: %v", err)
@@ -1665,7 +1750,7 @@ func (s *TaskService) CreateFollowUpTask(ctx context.Context, userID string, ori
 	return s.CreateTask(ctx, userID, followUpTask, false)
 }
 
-// ConsumeRabbitMQ обрабатывает сообщения из очереди
+// ConsumeRabbitMQ обрабатывает сообщения из очереди с проверкой подписки
 func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 	queue, err := s.RabbitMQChan.QueueDeclare("task_queue", true, false, false, false, nil)
 	if err != nil {
@@ -1753,6 +1838,19 @@ func (s *TaskService) ConsumeRabbitMQ(ctx context.Context) {
 			return
 		}
 		if jobType, ok := job["type"].(string); ok && jobType == "create_recurring_task" {
+			userID, _ := job["user_id"].(string)
+			hasSubscription, err := s.hasActiveSubscription(ctx, userID)
+			if err != nil {
+				log.Printf("Ошибка проверки подписки: %v", err)
+				msg.Nack(false, true)
+				return
+			}
+			if !hasSubscription {
+				log.Printf("Отсутствует активная подписка для пользователя %s", userID)
+				msg.Nack(false, true)
+				return
+			}
+
 			interval, _ := job["interval"].(string)
 			untilStr, _ := job["until"].(string)
 			until, err := time.Parse(time.RFC3339, untilStr)
