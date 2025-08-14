@@ -119,6 +119,9 @@ func setupDependencies(cfg config.Config) (*App, error) {
 
 	// Настройка маршрутизатора
 	r := gin.Default()
+	r.Use(middleware.CORSMiddleware())
+	r.Use(middleware.RateLimitMiddleware())
+	r.Use(middleware.LoggingMiddleware(logger))
 	r.Use(middleware.AuthMiddleware(cfg))
 
 	app := &App{
@@ -234,37 +237,41 @@ func (app *App) registerRoutes(h *handlers.TaskHandler) {
 	// Эндпоинты задач
 	api := r.Group("/tasks")
 	{
+		// Специфичные маршруты (должны идти перед параметризованными)
 		api.POST("/create", h.CreateTask)
-		api.GET("", h.GetTasks)
-		api.PUT("/:id", h.UpdateTask)
-		api.DELETE("/:id", h.DeleteTask)
-		api.POST("/:id/comments", h.AddComment)
+		api.POST("/create/predictive", h.CreateTaskWithPrediction)
 		api.POST("/report", h.GenerateReport)
 		api.GET("/reports", h.GetReports)
-		api.POST("/create/predictive", h.CreateTaskWithPrediction)
 		api.GET("/dashboard", h.GetDashboard)
 		api.GET("/my", h.GetMyTasks)
 		api.GET("/suggestions", h.GetTaskSuggestions)
 		api.POST("/report/quick", h.GenerateQuickReport)
 		api.POST("/bulk_assign", h.BulkAssignTasks)
-		api.GET("/:id", h.GetTask)
-		api.PUT("/:id/comments/:comment_id", h.UpdateComment)
-		api.DELETE("/:id/comments/:comment_id", h.DeleteComment)
 		api.GET("/task", h.GetTaskStats)
 		api.POST("/follow-up", h.CreateFollowUpTask)
 		api.GET("/sales/analytics", h.GetSalesAnalytics)
-		api.POST("/:task_id/time/start", h.StartTimeTracking)
 		api.POST("/time/stop", h.StopTimeTracking)
-		api.GET("/users/:user_id/time-report", h.GetTimeReport)
-		api.POST("/payroll/calculate", h.CalculatePayroll)
-		api.POST("/onboarding", h.CreateOnboardingChecklist)
-		api.POST("/leave/request", h.CreateLeaveRequest)
 		api.GET("/time/active", h.GetActiveTimeEntries)
 		api.GET("/time/total", h.CalculateTotalActiveTime)
+		api.POST("/payroll/calculate", h.CalculatePayroll)
 		api.GET("/payroll/aggregate", h.GetAggregatePayroll)
+		api.POST("/onboarding", h.CreateOnboardingChecklist)
+		api.POST("/leave/request", h.CreateLeaveRequest)
 		api.POST("/recurring", h.CreateRecurringTask)
 		api.GET("/productivity", h.GetProductivityReport)
 		api.POST("/tax-reminders", h.CreateTaxReminders)
+		
+		// Параметризованные маршруты
+		api.GET("", h.GetTasks)
+		api.GET("/:id", h.GetTask)
+		api.PUT("/:id", h.UpdateTask)
+		api.DELETE("/:id", h.DeleteTask)
+		api.POST("/:id/comments", h.AddComment)
+		api.PUT("/:id/comments/:comment_id", h.UpdateComment)
+		api.DELETE("/:id/comments/:comment_id", h.DeleteComment)
+		api.POST("/:task_id/time/start", h.StartTimeTracking)
+		api.GET("/users/:user_id/time-report", h.GetTimeReport)
+	}
 
 		api.POST("/financial-events", func(c *gin.Context) {
 			var event services.FinancialEvent
