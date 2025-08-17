@@ -1,757 +1,803 @@
 {
-    "swagger": "2.0",
-    "info": {
-        "contact": {}
+  "swagger": "2.0",
+  "info": {
+    "title": "Task Service API",
+    "description": "API для управления задачами, встречами, важными датами, интеграциями и контактами",
+    "version": "1.0.0",
+    "contact": {
+      "name": "API Support",
+      "url": "https://github.com/andre/task-service",
+      "email": "support@task-service.com"
     },
-    "paths": {
-        "/tasks": {
-            "get": {
-                "description": "Retrieve tasks with optional filters",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Get list of tasks",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task status",
-                        "name": "status",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "description": "Due date (YYYY-MM-DD)",
-                        "name": "due_date",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "default": 10,
-                        "description": "Limit",
-                        "name": "limit",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "default": 0,
-                        "description": "Offset",
-                        "name": "offset",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "response\" {\"tasks\": \"array\", \"total\": \"int\"}",
-                        "schema": {
-                            "type": "object"
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/bulk_assign": {
-            "post": {
-                "description": "Assign multiple tasks to a single user",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Bulk assign tasks",
-                "parameters": [
-                    {
-                        "description": "Task assignment request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "message response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/create": {
-            "post": {
-                "description": "Create a task with optional assignees",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Create a new task",
-                "parameters": [
-                    {
-                        "description": "Task data",
-                        "name": "task",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/models.Task"
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/create/predictive": {
-            "post": {
-                "description": "Create a task based on text with predictive suggestions",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Create a task with predictive input",
-                "parameters": [
-                    {
-                        "description": "Task creation request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/models.Task"
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/dashboard": {
-            "get": {
-                "description": "Retrieve dashboard data with filters",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Get admin dashboard",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Filter by date (YYYY-MM-DD)",
-                        "name": "date",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "description": "Filter by status",
-                        "name": "status",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "description": "Filter by user ID",
-                        "name": "user_id",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/services.Dashboard"
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/my": {
-            "get": {
-                "description": "Retrieve tasks assigned to the current user",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Get user's tasks",
-                "responses": {
-                    "200": {
-                        "description": "response\" {\"tasks\": \"array\"}",
-                        "schema": {
-                            "type": "object"
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/report": {
-            "post": {
-                "description": "Generate a report for a specified period",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Generate a report",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Period (day, week, month)",
-                        "name": "period",
-                        "in": "query",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/services.Report"
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/report/quick": {
-            "post": {
-                "description": "Generate a report for a specified period with default week",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Generate a quick report",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "default": "week",
-                        "description": "Period (day, week, month)",
-                        "name": "period",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/services.Report"
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/reports": {
-            "get": {
-                "description": "Retrieve all reports for the user's company",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Get list of reports",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/services.Report"
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/suggestions": {
-            "get": {
-                "description": "Retrieve contextual suggestions based on text input",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Get task suggestions",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Input text for suggestions",
-                        "name": "text",
-                        "in": "query",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "response\" {\"suggestions\": \"array\"}",
-                        "schema": {
-                            "type": "object"
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/{id}": {
-            "put": {
-                "description": "Update task details and assignees",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Update a task",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Task data",
-                        "name": "task",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/models.Task"
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            },
-            "delete": {
-                "description": "Delete a task by ID",
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Delete a task",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "message response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/tasks/{id}/comments": {
-            "post": {
-                "description": "Add a comment to a specific task",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "tasks"
-                ],
-                "summary": "Add a comment to a task",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Comment text",
-                        "name": "comment",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "$ref": "#/definitions/models.Comment"
-                        }
-                    },
-                    "400": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "error response",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    },
-    "definitions": {
-        "models.Assignee": {
-            "type": "object",
-            "properties": {
-                "user_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "models.Comment": {
-            "type": "object",
-            "properties": {
-                "comment_id": {
-                    "type": "string"
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "task_id": {
-                    "type": "string"
-                },
-                "text": {
-                    "type": "string"
-                },
-                "user_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "models.Task": {
-            "type": "object",
-            "properties": {
-                "assignees": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/models.Assignee"
-                    }
-                },
-                "comments": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/models.Comment"
-                    }
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "created_by": {
-                    "type": "string"
-                },
-                "description": {
-                    "type": "string"
-                },
-                "due_date": {
-                    "type": "string"
-                },
-                "status": {
-                    "type": "string"
-                },
-                "task_id": {
-                    "type": "string"
-                },
-                "title": {
-                    "type": "string"
-                }
-            }
-        },
-        "services.Dashboard": {
-            "type": "object",
-            "properties": {
-                "employee_load": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/services.EmployeeLoad"
-                    }
-                },
-                "overdue_tasks": {
-                    "type": "integer"
-                },
-                "task_count": {
-                    "type": "integer"
-                }
-            }
-        },
-        "services.EmployeeLoad": {
-            "type": "object",
-            "properties": {
-                "task_count": {
-                    "type": "integer"
-                },
-                "total_priority": {
-                    "type": "integer"
-                },
-                "user_id": {
-                    "type": "string"
-                }
-            }
-        },
-        "services.Report": {
-            "type": "object",
-            "properties": {
-                "company_id": {
-                    "type": "string"
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "data": {
-                    "type": "string"
-                },
-                "period": {
-                    "type": "string"
-                },
-                "report_id": {
-                    "type": "string"
-                }
-            }
-        }
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
     }
+  },
+  "host": "localhost:8009",
+  "basePath": "/api/v1",
+  "schemes": ["http", "https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "securityDefinitions": {
+    "BearerAuth": {
+      "type": "apiKey",
+      "name": "Authorization",
+      "in": "header"
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "tasks",
+      "description": "Операции с задачами"
+    },
+    {
+      "name": "meetings",
+      "description": "Операции со встречами"
+    },
+    {
+      "name": "important-dates",
+      "description": "Операции с важными датами"
+    },
+    {
+      "name": "integrations",
+      "description": "Операции с внешними интеграциями"
+    },
+    {
+      "name": "contacts",
+      "description": "Операции с контактами"
+    },
+    {
+      "name": "comments",
+      "description": "Операции с комментариями"
+    },
+    {
+      "name": "subscriptions",
+      "description": "Операции с подписками"
+    },
+    {
+      "name": "google-calendar",
+      "description": "Операции с Google Calendar"
+    },
+    {
+      "name": "websocket",
+      "description": "WebSocket соединения"
+    },
+    {
+      "name": "analytics",
+      "description": "Аналитика и отчеты"
+    },
+    {
+      "name": "export",
+      "description": "Экспорт данных"
+    }
+  ],
+  "paths": {
+    "/tasks": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Создать новую задачу",
+        "description": "Создает новую задачу в системе",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "task",
+            "in": "body",
+            "description": "Данные задачи",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/Task"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Задача создана успешно",
+            "schema": {
+              "$ref": "#/definitions/Task"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["tasks"],
+        "summary": "Получить список задач",
+        "description": "Возвращает список задач с возможностью фильтрации",
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Статус задачи",
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed", "cancelled"]
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "description": "Приоритет задачи",
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          },
+          {
+            "name": "assignee_id",
+            "in": "query",
+            "description": "ID исполнителя",
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Номер страницы",
+            "type": "integer",
+            "default": 1
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Количество элементов на странице",
+            "type": "integer",
+            "default": 20
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список задач",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "tasks": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/Task"
+                  }
+                },
+                "pagination": {
+                  "$ref": "#/definitions/Pagination"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "Внутренняя ошибка сервера",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "tags": ["tasks"],
+        "summary": "Получить задачу по ID",
+        "description": "Возвращает задачу по указанному ID",
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "ID задачи",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Задача найдена",
+            "schema": {
+              "$ref": "#/definitions/Task"
+            }
+          },
+          "404": {
+            "description": "Задача не найдена",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["tasks"],
+        "summary": "Обновить задачу",
+        "description": "Обновляет существующую задачу",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "ID задачи",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          },
+          {
+            "name": "task",
+            "in": "body",
+            "description": "Данные для обновления",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/TaskUpdate"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Задача обновлена успешно",
+            "schema": {
+              "$ref": "#/definitions/Task"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "404": {
+            "description": "Задача не найдена",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["tasks"],
+        "summary": "Удалить задачу",
+        "description": "Удаляет задачу по указанному ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "ID задачи",
+            "required": true,
+            "type": "string",
+            "format": "uuid"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Задача удалена успешно"
+          },
+          "404": {
+            "description": "Задача не найдена",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/meetings": {
+      "post": {
+        "tags": ["meetings"],
+        "summary": "Создать новую встречу",
+        "description": "Создает новую встречу с участниками и планированием",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "meeting",
+            "in": "body",
+            "description": "Данные встречи",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/Meeting"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Встреча создана успешно",
+            "schema": {
+              "$ref": "#/definitions/Meeting"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["meetings"],
+        "summary": "Получить список встреч",
+        "description": "Возвращает список встреч с фильтрацией",
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Дата начала (YYYY-MM-DD)",
+            "type": "string",
+            "format": "date"
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Дата окончания (YYYY-MM-DD)",
+            "type": "string",
+            "format": "date"
+          },
+          {
+            "name": "meeting_type",
+            "in": "query",
+            "description": "Тип встречи",
+            "type": "string",
+            "enum": ["internal", "client", "supplier", "partner"]
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Статус встречи",
+            "type": "string",
+            "enum": ["scheduled", "confirmed", "cancelled", "completed"]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список встреч",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Meeting"
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/important-dates": {
+      "post": {
+        "tags": ["important-dates"],
+        "summary": "Создать важную дату",
+        "description": "Создает новую важную дату с напоминаниями",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "important_date",
+            "in": "body",
+            "description": "Данные важной даты",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ImportantDate"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Важная дата создана успешно",
+            "schema": {
+              "$ref": "#/definitions/ImportantDate"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/integrations": {
+      "post": {
+        "tags": ["integrations"],
+        "summary": "Создать внешнюю интеграцию",
+        "description": "Создает новую интеграцию с внешней системой",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "integration",
+            "in": "body",
+            "description": "Данные интеграции",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ExternalIntegration"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Интеграция создана успешно",
+            "schema": {
+              "$ref": "#/definitions/ExternalIntegration"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/contacts": {
+      "post": {
+        "tags": ["contacts"],
+        "summary": "Создать новый контакт",
+        "description": "Создает новый контакт в системе",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "name": "contact",
+            "in": "body",
+            "description": "Данные контакта",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/Contact"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Контакт создан успешно",
+            "schema": {
+              "$ref": "#/definitions/Contact"
+            }
+          },
+          "400": {
+            "description": "Неверные данные",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "Не авторизован",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Task": {
+      "type": "object",
+      "required": ["title", "description", "priority"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Уникальный идентификатор задачи"
+        },
+        "title": {
+          "type": "string",
+          "description": "Название задачи",
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "description": "Описание задачи"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "completed", "cancelled"],
+          "default": "pending",
+          "description": "Статус задачи"
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "Приоритет задачи"
+        },
+        "assignee_id": {
+          "type": "string",
+          "description": "ID исполнителя задачи"
+        },
+        "due_date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Срок выполнения задачи"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Дата создания"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Дата последнего обновления"
+        }
+      }
+    },
+    "Meeting": {
+      "type": "object",
+      "required": ["title", "start_time", "end_time"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Уникальный идентификатор встречи"
+        },
+        "title": {
+          "type": "string",
+          "description": "Название встречи",
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "description": "Описание встречи"
+        },
+        "start_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Время начала встречи"
+        },
+        "end_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Время окончания встречи"
+        },
+        "location": {
+          "type": "string",
+          "description": "Место проведения встречи"
+        },
+        "meeting_type": {
+          "type": "string",
+          "enum": ["internal", "client", "supplier", "partner"],
+          "default": "internal",
+          "description": "Тип встречи"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["scheduled", "confirmed", "cancelled", "completed"],
+          "default": "scheduled",
+          "description": "Статус встречи"
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "default": "medium",
+          "description": "Приоритет встречи"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Список участников"
+        }
+      }
+    },
+    "ImportantDate": {
+      "type": "object",
+      "required": ["title", "date", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Уникальный идентификатор важной даты"
+        },
+        "title": {
+          "type": "string",
+          "description": "Название важной даты",
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "description": "Описание важной даты"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "description": "Дата события"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["tax_deadline", "contract_expiry", "payment_due", "birthday", "anniversary", "other"],
+          "description": "Тип важной даты"
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "default": "medium",
+          "description": "Приоритет важной даты"
+        },
+        "reminder_days": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "За сколько дней напоминать"
+        }
+      }
+    },
+    "ExternalIntegration": {
+      "type": "object",
+      "required": ["provider", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Уникальный идентификатор интеграции"
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["google_calendar", "outlook", "slack", "telegram", "whatsapp"],
+          "description": "Провайдер интеграции"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["calendar", "messaging", "notification", "crm"],
+          "description": "Тип интеграции"
+        },
+        "is_active": {
+          "type": "boolean",
+          "default": true,
+          "description": "Активна ли интеграция"
+        },
+        "sync_interval": {
+          "type": "integer",
+          "default": 60,
+          "description": "Интервал синхронизации в минутах"
+        }
+      }
+    },
+    "Contact": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Уникальный идентификатор контакта"
+        },
+        "name": {
+          "type": "string",
+          "description": "Имя контакта",
+          "maxLength": 100
+        },
+        "type": {
+          "type": "string",
+          "enum": ["client", "supplier", "partner", "employee", "prospect"],
+          "description": "Тип контакта"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Email адрес"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Номер телефона"
+        },
+        "company": {
+          "type": "string",
+          "description": "Название компании"
+        },
+        "position": {
+          "type": "string",
+          "description": "Должность"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "inactive", "archived"],
+          "default": "active",
+          "description": "Статус контакта"
+        }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string",
+          "description": "Описание ошибки"
+        },
+        "code": {
+          "type": "string",
+          "description": "Код ошибки"
+        },
+        "details": {
+          "type": "object",
+          "description": "Детали ошибки"
+        }
+      }
+    },
+    "Pagination": {
+      "type": "object",
+      "properties": {
+        "page": {
+          "type": "integer",
+          "description": "Текущая страница"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Количество элементов на странице"
+        },
+        "total": {
+          "type": "integer",
+          "description": "Общее количество элементов"
+        },
+        "pages": {
+          "type": "integer",
+          "description": "Общее количество страниц"
+        }
+      }
+    }
+  }
 }

@@ -4,57 +4,190 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
+// Config структура конфигурации приложения
 type Config struct {
-	JWTSecret           string        // Секрет для JWT
-	JWTRotationInterval int           // Интервал ротации JWT секретов (в секундах)
-	JWTEncryptionKey    string        // Ключ шифрования для JWT секретов
-	BlacklistTTL        time.Duration // Время жизни токенов в blacklist
-	RoleCacheTTL        time.Duration // Время жизни кэша ролей в Redis
-	DBConn              string        // Строка подключения к базе данных
-	RabbitMQ            string        // URL для RabbitMQ
-	Port                string        // Порт сервера
-	RedisAddr           string        // Адрес Redis
-	JWTSecretOld        string        // Старый секрет JWT (опционально)
-	Language            string        // Язык приложения
-	GoogleClientID      string        // Google Client ID
-	GoogleClientSecret  string        // Google Client Secret
-	GoogleRedirectURI   string        // Google Redirect URI
-	AuthService         string        // URL сервиса аутентификации
+	Server              ServerConfig
+	Database            DatabaseConfig
+	Redis               RedisConfig
+	RabbitMQ            RabbitMQConfig
+	NotificationService NotificationServiceConfig
+	GoogleCalendar      GoogleCalendarConfig
+	Logging             LoggingConfig
 }
 
-func LoadConfig() Config {
-	return Config{
-		JWTSecret:           getEnv("JWT_SECRET", "your_initial_secret_key"),
-		JWTRotationInterval: getEnvAsInt("JWT_ROTATION_INTERVAL", 86400),                                              // 24 часа в секундах
-		JWTEncryptionKey:    getEnv("JWT_ENCRYPTION_KEY", "32-byte-long-secret-key-for-aes!"),                         // Должен быть 32 байта для AES-256
-		BlacklistTTL:        time.Duration(getEnvAsInt("BLACKLIST_TTL", int(24*time.Hour/time.Second))) * time.Second, // 24 часа
-		RoleCacheTTL:        time.Duration(getEnvAsInt("ROLE_CACHE_TTL", int(1*time.Hour/time.Second))) * time.Second, // 1 час
-		DBConn:              getEnv("DB_CONN", "postgresql://postgres:mysecretpassword@host.docker.internal:5432/tasks"),
-		RabbitMQ:            getEnv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/"),
-		Port:                getEnv("PORT", "8082"),
-		RedisAddr:           getEnv("REDIS_ADDR", "redis:6379"),
-		JWTSecretOld:        getEnv("JWT_SECRET_OLD", ""),
-		Language:            getEnv("LANGUAGE", "en"),
-		GoogleClientID:      getEnv("GOOGLE_CLIENT_ID", "your-google-client-id"),
-		GoogleClientSecret:  getEnv("GOOGLE_CLIENT_SECRET", "your-google-client-secret"),
-		GoogleRedirectURI:   getEnv("GOOGLE_REDIRECT_URI", "http://localhost:8082/google/callback"),
-		AuthService:         getEnv("AUTH_SERVICE", "http://localhost:8082"),
-	}
+// ServerConfig конфигурация сервера
+type ServerConfig struct {
+	Port         string
+	Host         string
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
 }
+
+// DatabaseConfig конфигурация базы данных
+type DatabaseConfig struct {
+	Host            string
+	Port            string
+	User            string
+	Password        string
+	DBName          string
+	SSLMode         string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+// RedisConfig конфигурация Redis
+type RedisConfig struct {
+	Host         string
+	Port         string
+	Password     string
+	DB           int
+	PoolSize     int
+	MinIdleConns int
+	MaxRetries   int
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+}
+
+// RabbitMQConfig конфигурация RabbitMQ
+type RabbitMQConfig struct {
+	URL        string
+	MaxRetries int
+	RetryDelay time.Duration
+}
+
+// NotificationServiceConfig конфигурация сервиса уведомлений
+type NotificationServiceConfig struct {
+	URL     string
+	APIKey  string
+	Timeout time.Duration
+}
+
+// GoogleCalendarConfig конфигурация Google Calendar
+type GoogleCalendarConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	Scopes       []string
+}
+
+// LoggingConfig конфигурация логирования
+type LoggingConfig struct {
+	Level      string
+	Format     string
+	OutputPath string
+}
+
+// Load загружает конфигурацию из переменных окружения
+func Load() (*Config, error) {
+	// Загрузка .env файла если существует
+	if err := godotenv.Load(); err != nil {
+		// Игнорируем ошибку если файл не найден
+	}
+
+	config := &Config{
+		Server: ServerConfig{
+			Port:         getEnv("SERVER_PORT", "8009"),
+			Host:         getEnv("SERVER_HOST", "0.0.0.0"),
+			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 30*time.Second),
+			WriteTimeout: getDurationEnv("SERVER_WRITE_TIMEOUT", 30*time.Second),
+			IdleTimeout:  getDurationEnv("SERVER_IDLE_TIMEOUT", 60*time.Second),
+		},
+		Database: DatabaseConfig{
+			Host:            getEnv("DB_HOST", "localhost"),
+			Port:            getEnv("DB_PORT", "5432"),
+			User:            getEnv("DB_USER", "postgres"),
+			Password:        getEnv("DB_PASSWORD", "password"),
+			DBName:          getEnv("DB_NAME", "task_service"),
+			SSLMode:         getEnv("DB_SSLMODE", "disable"),
+			MaxOpenConns:    getIntEnv("DB_MAX_OPEN_CONNS", 25),
+			MaxIdleConns:    getIntEnv("DB_MAX_IDLE_CONNS", 5),
+			ConnMaxLifetime: getDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute),
+		},
+		Redis: RedisConfig{
+			Host:         getEnv("REDIS_HOST", "localhost"),
+			Port:         getEnv("REDIS_PORT", "6379"),
+			Password:     getEnv("REDIS_PASSWORD", ""),
+			DB:           getIntEnv("REDIS_DB", 0),
+			PoolSize:     getIntEnv("REDIS_POOL_SIZE", 10),
+			MinIdleConns: getIntEnv("REDIS_MIN_IDLE_CONNS", 5),
+			MaxRetries:   getIntEnv("REDIS_MAX_RETRIES", 3),
+			DialTimeout:  getDurationEnv("REDIS_DIAL_TIMEOUT", 5*time.Second),
+			ReadTimeout:  getDurationEnv("REDIS_READ_TIMEOUT", 3*time.Second),
+			WriteTimeout: getDurationEnv("REDIS_WRITE_TIMEOUT", 3*time.Second),
+		},
+		RabbitMQ: RabbitMQConfig{
+			URL:        getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+			MaxRetries: getIntEnv("RABBITMQ_MAX_RETRIES", 3),
+			RetryDelay: getDurationEnv("RABBITMQ_RETRY_DELAY", 5*time.Second),
+		},
+		NotificationService: NotificationServiceConfig{
+			URL:     getEnv("NOTIFICATION_SERVICE_URL", "http://localhost:8008"),
+			APIKey:  getEnv("NOTIFICATION_SERVICE_API_KEY", ""),
+			Timeout: getDurationEnv("NOTIFICATION_SERVICE_TIMEOUT", 30*time.Second),
+		},
+		GoogleCalendar: GoogleCalendarConfig{
+			ClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:  getEnv("GOOGLE_REDIRECT_URL", ""),
+			Scopes: []string{
+				"https://www.googleapis.com/auth/calendar",
+				"https://www.googleapis.com/auth/calendar.events",
+			},
+		},
+		Logging: LoggingConfig{
+			Level:      getEnv("LOG_LEVEL", "info"),
+			Format:     getEnv("LOG_FORMAT", "json"),
+			OutputPath: getEnv("LOG_OUTPUT_PATH", ""),
+		},
+	}
+
+	return config, nil
+}
+
+// GetDSN возвращает строку подключения к базе данных
+func (c *DatabaseConfig) GetDSN() string {
+	return "host=" + c.Host +
+		" port=" + c.Port +
+		" user=" + c.User +
+		" password=" + c.Password +
+		" dbname=" + c.DBName +
+		" sslmode=" + c.SSLMode
+}
+
+// GetRedisAddr возвращает адрес Redis
+func (c *RedisConfig) GetRedisAddr() string {
+	return c.Host + ":" + c.Port
+}
+
+// Вспомогательные функции для получения переменных окружения
 
 func getEnv(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
+	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return defaultValue
 }
 
-func getEnvAsInt(key string, defaultValue int) int {
-	if value, exists := os.LookupEnv(key); exists {
+func getIntEnv(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
+		}
+	}
+	return defaultValue
+}
+
+func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			return duration
 		}
 	}
 	return defaultValue
