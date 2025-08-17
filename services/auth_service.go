@@ -37,7 +37,7 @@ func NewAuthService(cfg config.Config, redisClient *redis.Client, db *gorm.DB) (
 
 	service := &AuthService{
 		Config:        cfg,
-		CurrentSecret: cfg.JWTSecret,
+		CurrentSecret: cfg.JWT.Secret,
 		Redis:         redisClient,
 		DB:            db,
 		Logger:        logger,

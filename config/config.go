@@ -16,6 +16,7 @@ type Config struct {
 	RabbitMQ RabbitMQConfig
 	Auth     AuthConfig
 	Logging  LoggingConfig
+	JWT      JWTConfig
 }
 
 // ServerConfig конфигурация сервера
@@ -89,6 +90,15 @@ type AuthConfig struct {
 	Timeout    time.Duration
 }
 
+// JWTConfig конфигурация для JWT
+type JWTConfig struct {
+	Secret           string
+	EncryptionKey    string
+	RotationInterval int
+	RoleCacheTTL     time.Duration
+	BlacklistTTL     time.Duration
+}
+
 // Load загружает конфигурацию из переменных окружения
 func Load() (*Config, error) {
 	// Загрузка .env файла если существует
@@ -126,6 +136,13 @@ func Load() (*Config, error) {
 		Auth: AuthConfig{
 			ServiceURL: getStringEnv("AUTH_SERVICE_URL", "http://auth-service:8000"),
 			Timeout:    getDurationEnv("AUTH_TIMEOUT", 10*time.Second),
+		},
+		JWT: JWTConfig{
+			Secret:           getStringEnv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+			EncryptionKey:    getStringEnv("JWT_ENCRYPTION_KEY", "your-encryption-key-32-chars"),
+			RotationInterval: getIntEnv("JWT_ROTATION_INTERVAL", 3600),
+			RoleCacheTTL:     getDurationEnv("JWT_ROLE_CACHE_TTL", 24*time.Hour),
+			BlacklistTTL:     getDurationEnv("JWT_BLACKLIST_TTL", 7*24*time.Hour),
 		},
 		Logging: LoggingConfig{
 			Level: getStringEnv("LOG_LEVEL", "info"),
