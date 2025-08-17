@@ -8,7 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RateLimiter - структура для rate limiting
+// RateLimiter структура для ограничения скорости
 type RateLimiter struct {
 	requests map[string][]time.Time
 	mutex    sync.RWMutex
@@ -16,7 +16,7 @@ type RateLimiter struct {
 	window   time.Duration
 }
 
-// NewRateLimiter - создание нового rate limiter
+// NewRateLimiter создает новый rate limiter
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
 		requests: make(map[string][]time.Time),
@@ -25,26 +25,27 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	}
 }
 
-// RateLimitMiddleware - middleware для ограничения частоты запросов
-func RateLimitMiddleware() gin.HandlerFunc {
+// RateLimit middleware для ограничения скорости запросов
+func RateLimit() gin.HandlerFunc {
 	limiter := NewRateLimiter(100, time.Minute) // 100 запросов в минуту
 
-	return func(c *gin.Context) {
+	return gin.HandlerFunc(func(c *gin.Context) {
 		clientIP := c.ClientIP()
-		
+
 		if !limiter.Allow(clientIP) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "Rate limit exceeded. Please try again later.",
+				"error":       "Rate limit exceeded",
+				"retry_after": 60,
 			})
 			c.Abort()
 			return
 		}
 
 		c.Next()
-	}
+	})
 }
 
-// Allow - проверка разрешения запроса
+// Allow проверяет, разрешен ли запрос
 func (rl *RateLimiter) Allow(key string) bool {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
@@ -52,23 +53,23 @@ func (rl *RateLimiter) Allow(key string) bool {
 	now := time.Now()
 	windowStart := now.Add(-rl.window)
 
-	// Очистка старых запросов
-	if requests, exists := rl.requests[key]; exists {
-		var validRequests []time.Time
-		for _, reqTime := range requests {
-			if reqTime.After(windowStart) {
-				validRequests = append(validRequests, reqTime)
+	// Очищаем старые запросы
+	if times, exists := rl.requests[key]; exists {
+		var validTimes []time.Time
+		for _, t := range times {
+			if t.After(windowStart) {
+				validTimes = append(validTimes, t)
 			}
 		}
-		rl.requests[key] = validRequests
+		rl.requests[key] = validTimes
 	}
 
-	// Проверка лимита
+	// Проверяем лимит
 	if len(rl.requests[key]) >= rl.limit {
 		return false
 	}
 
-	// Добавление нового запроса
+	// Добавляем текущий запрос
 	rl.requests[key] = append(rl.requests[key], now)
 	return true
-} 
+}

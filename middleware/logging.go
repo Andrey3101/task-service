@@ -7,18 +7,34 @@ import (
 	"go.uber.org/zap"
 )
 
-// LoggingMiddleware - middleware для логирования запросов
-func LoggingMiddleware(logger *zap.Logger) gin.HandlerFunc {
-	return gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+// Logging middleware для логирования запросов
+func Logging(logger *zap.Logger) gin.HandlerFunc {
+	return gin.HandlerFunc(func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		raw := c.Request.URL.RawQuery
+
+		// Обрабатываем запрос
+		c.Next()
+
+		// Логируем результат
+		latency := time.Since(start)
+		clientIP := c.ClientIP()
+		method := c.Request.Method
+		statusCode := c.Writer.Status()
+		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
+
+		if len(raw) > 0 {
+			path = path + "?" + raw
+		}
+
 		logger.Info("HTTP Request",
-			zap.String("method", param.Method),
-			zap.String("path", param.Path),
-			zap.Int("status", param.StatusCode),
-			zap.String("ip", param.ClientIP),
-			zap.String("user_agent", param.Request.UserAgent()),
-			zap.Duration("latency", param.Latency),
-			zap.String("error", param.ErrorMessage),
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.Int("status", statusCode),
+			zap.String("ip", clientIP),
+			zap.Duration("latency", latency),
+			zap.String("error", errorMessage),
 		)
-		return ""
 	})
-} 
+}

@@ -10,13 +10,12 @@ import (
 
 // Config структура конфигурации приложения
 type Config struct {
-	Server              ServerConfig
-	Database            DatabaseConfig
-	Redis               RedisConfig
-	RabbitMQ            RabbitMQConfig
-	NotificationService NotificationServiceConfig
-	GoogleCalendar      GoogleCalendarConfig
-	Logging             LoggingConfig
+	Server   ServerConfig
+	Database DatabaseConfig
+	Redis    RedisConfig
+	RabbitMQ RabbitMQConfig
+	Auth     AuthConfig
+	Logging  LoggingConfig
 }
 
 // ServerConfig конфигурация сервера
@@ -84,6 +83,12 @@ type LoggingConfig struct {
 	OutputPath string
 }
 
+// AuthConfig конфигурация для auth-service
+type AuthConfig struct {
+	ServiceURL string
+	Timeout    time.Duration
+}
+
 // Load загружает конфигурацию из переменных окружения
 func Load() (*Config, error) {
 	// Загрузка .env файла если существует
@@ -91,64 +96,43 @@ func Load() (*Config, error) {
 		// Игнорируем ошибку если файл не найден
 	}
 
-	config := &Config{
+	cfg := &Config{
 		Server: ServerConfig{
-			Port:         getEnv("SERVER_PORT", "8009"),
-			Host:         getEnv("SERVER_HOST", "0.0.0.0"),
+			Port:         getIntEnv("SERVER_PORT", 8009),
+			Host:         getStringEnv("SERVER_HOST", "0.0.0.0"),
 			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 30*time.Second),
 			WriteTimeout: getDurationEnv("SERVER_WRITE_TIMEOUT", 30*time.Second),
-			IdleTimeout:  getDurationEnv("SERVER_IDLE_TIMEOUT", 60*time.Second),
 		},
 		Database: DatabaseConfig{
-			Host:            getEnv("DB_HOST", "localhost"),
-			Port:            getEnv("DB_PORT", "5432"),
-			User:            getEnv("DB_USER", "postgres"),
-			Password:        getEnv("DB_PASSWORD", "password"),
-			DBName:          getEnv("DB_NAME", "task_service"),
-			SSLMode:         getEnv("DB_SSLMODE", "disable"),
+			Host:            getStringEnv("DB_HOST", "localhost"),
+			Port:            getIntEnv("DB_PORT", 5432),
+			User:            getStringEnv("DB_USER", "postgres"),
+			Password:        getStringEnv("DB_PASSWORD", "password"),
+			DBName:          getStringEnv("DB_NAME", "task_service"),
+			SSLMode:         getStringEnv("DB_SSLMODE", "disable"),
 			MaxOpenConns:    getIntEnv("DB_MAX_OPEN_CONNS", 25),
 			MaxIdleConns:    getIntEnv("DB_MAX_IDLE_CONNS", 5),
 			ConnMaxLifetime: getDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute),
 		},
 		Redis: RedisConfig{
-			Host:         getEnv("REDIS_HOST", "localhost"),
-			Port:         getEnv("REDIS_PORT", "6379"),
-			Password:     getEnv("REDIS_PASSWORD", ""),
-			DB:           getIntEnv("REDIS_DB", 0),
-			PoolSize:     getIntEnv("REDIS_POOL_SIZE", 10),
-			MinIdleConns: getIntEnv("REDIS_MIN_IDLE_CONNS", 5),
-			MaxRetries:   getIntEnv("REDIS_MAX_RETRIES", 3),
-			DialTimeout:  getDurationEnv("REDIS_DIAL_TIMEOUT", 5*time.Second),
-			ReadTimeout:  getDurationEnv("REDIS_READ_TIMEOUT", 3*time.Second),
-			WriteTimeout: getDurationEnv("REDIS_WRITE_TIMEOUT", 3*time.Second),
+			Host:     getStringEnv("REDIS_HOST", "localhost"),
+			Port:     getIntEnv("REDIS_PORT", 6379),
+			Password: getStringEnv("REDIS_PASSWORD", ""),
+			DB:       getIntEnv("REDIS_DB", 0),
 		},
 		RabbitMQ: RabbitMQConfig{
-			URL:        getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
-			MaxRetries: getIntEnv("RABBITMQ_MAX_RETRIES", 3),
-			RetryDelay: getDurationEnv("RABBITMQ_RETRY_DELAY", 5*time.Second),
+			URL: getStringEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		},
-		NotificationService: NotificationServiceConfig{
-			URL:     getEnv("NOTIFICATION_SERVICE_URL", "http://localhost:8008"),
-			APIKey:  getEnv("NOTIFICATION_SERVICE_API_KEY", ""),
-			Timeout: getDurationEnv("NOTIFICATION_SERVICE_TIMEOUT", 30*time.Second),
-		},
-		GoogleCalendar: GoogleCalendarConfig{
-			ClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
-			ClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
-			RedirectURL:  getEnv("GOOGLE_REDIRECT_URL", ""),
-			Scopes: []string{
-				"https://www.googleapis.com/auth/calendar",
-				"https://www.googleapis.com/auth/calendar.events",
-			},
+		Auth: AuthConfig{
+			ServiceURL: getStringEnv("AUTH_SERVICE_URL", "http://auth-service:8000"),
+			Timeout:    getDurationEnv("AUTH_TIMEOUT", 10*time.Second),
 		},
 		Logging: LoggingConfig{
-			Level:      getEnv("LOG_LEVEL", "info"),
-			Format:     getEnv("LOG_FORMAT", "json"),
-			OutputPath: getEnv("LOG_OUTPUT_PATH", ""),
+			Level: getStringEnv("LOG_LEVEL", "info"),
 		},
 	}
 
-	return config, nil
+	return cfg, nil
 }
 
 // GetDSN возвращает строку подключения к базе данных
@@ -189,6 +173,13 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 		if duration, err := time.ParseDuration(value); err == nil {
 			return duration
 		}
+	}
+	return defaultValue
+}
+
+func getStringEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 	return defaultValue
 }

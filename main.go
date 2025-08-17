@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	v1 "github.com/andre/task-service/api/v1"
 	"github.com/andre/task-service/config"
 	"github.com/andre/task-service/handlers"
 	"github.com/andre/task-service/middleware"
@@ -38,6 +37,7 @@ const (
 
 // App - структура для хранения зависимостей приложения
 type App struct {
+	Config               *config.Config
 	DBConn               *sql.DB
 	DB                   *gorm.DB
 	Redis                *redis.Client
@@ -66,6 +66,17 @@ var upgrader = websocket.Upgrader{
 		// Здесь можно добавить более строгую проверку происхождения
 		return true
 	},
+}
+
+// healthCheck проверка состояния сервиса
+func (app *App) healthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "ok",
+		"timestamp": time.Now().Unix(),
+		"service":   "task-service",
+		"version":   "1.0.0",
+		"uptime":    time.Since(app.StartTime).Seconds(),
+	})
 }
 
 // setupDependencies инициализирует все зависимости приложения
@@ -135,45 +146,36 @@ func setupDependencies(cfg *config.Config, logger *zap.Logger) (*App, error) {
 	r.Use(gin.Logger())
 
 	// Инициализация сервисов
-	googleCalendar := services.NewGoogleCalendarService(cfg, redisClient)
-	taskService, err := services.NewTaskService(db, redisClient, googleCalendar, cfg.RabbitMQ)
-	if err != nil {
-		logger.Fatal("Failed to initialize TaskService", zap.Error(err))
-		return nil, err
-	}
+	app.TaskService = services.NewTaskService(app.DB, app.Redis, app.RabbitMQChan, app.Logger)
+	app.MeetingService = services.NewMeetingService(app.DB, app.Redis, app.Logger)
+	app.ImportantDateService = services.NewImportantDateService(app.DB, app.Redis, app.Logger)
+	app.IntegrationService = services.NewIntegrationService(app.DB, app.Redis, app.Logger)
+	app.ContactService = services.NewContactService(app.DB, app.Redis, app.Logger)
+	app.NotificationService = services.NewNotificationService(app.Redis, app.RabbitMQChan, app.Logger)
+	app.CacheService = services.NewCacheService(app.Redis, app.Logger)
+	app.QueueService = services.NewQueueService(app.RabbitMQChan, app.Logger)
+	app.QueueServiceOld = queue.NewQueueService(app.RabbitMQChan, app.Logger)
+	app.GoogleCalendarService = services.NewGoogleCalendarService(app.DB, app.Logger)
 
-	// Инициализация новых сервисов
-	meetingService := services.NewMeetingService(db)
-	importantDateService := services.NewImportantDateService(db)
-	integrationService := services.NewIntegrationService(db)
-	contactService := services.NewContactService(db)
-	notificationService := services.NewNotificationService(cfg, logger)
-	cacheService := services.NewCacheService(redisClient, logger)
-	queueService, err := services.NewQueueService(cfg, logger)
-	if err != nil {
-		logger.Fatal("Failed to initialize QueueService", zap.Error(err))
-		return nil, err
-	}
-
-	queueServiceOld := queue.NewQueueService(cfg, taskService)
-	taskHandler := handlers.NewTaskHandler(taskService, cfg)
+	taskHandler := handlers.NewTaskHandler(app.TaskService, cfg)
 
 	app := &App{
+		Config:               cfg,
 		DBConn:               dbConn, // Сохраняем *sql.DB для закрытия
 		DB:                   db,
 		Redis:                redisClient,
 		RabbitMQ:             rabbitConn,
 		RabbitMQChan:         rabbitCh,
 		Router:               r,
-		TaskService:          taskService,
-		MeetingService:       meetingService,
-		ImportantDateService: importantDateService,
-		IntegrationService:   integrationService,
-		ContactService:       contactService,
-		NotificationService:  notificationService,
-		CacheService:         cacheService,
-		QueueService:         queueService,
-		QueueServiceOld:      queueServiceOld,
+		TaskService:          app.TaskService,
+		MeetingService:       app.MeetingService,
+		ImportantDateService: app.ImportantDateService,
+		IntegrationService:   app.IntegrationService,
+		ContactService:       app.ContactService,
+		NotificationService:  app.NotificationService,
+		CacheService:         app.CacheService,
+		QueueService:         app.QueueService,
+		QueueServiceOld:      app.QueueServiceOld,
 		TaskHandler:          taskHandler,
 		StartTime:            time.Now(),
 		Logger:               logger,
@@ -183,42 +185,90 @@ func setupDependencies(cfg *config.Config, logger *zap.Logger) (*App, error) {
 }
 
 // setupRoutes настраивает маршруты приложения
-func setupRoutes(app *App) {
+func (app *App) setupRoutes() {
 	// Middleware
+	app.Router.Use(gin.Recovery())
 	app.Router.Use(middleware.CORS())
 	app.Router.Use(middleware.RateLimit())
 	app.Router.Use(middleware.Logging(app.Logger))
 	app.Router.Use(middleware.Security())
 
-	// Swagger документация
-	app.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	// API v1 с аутентификацией
+	v1Group := app.Router.Group("/api/v1")
+	{
+		// Публичные маршруты (без аутентификации)
+		v1Group.GET("/health", app.healthCheck)
+		v1Group.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// API версионирование
-	v1.SetupRoutes(app.Router, app.TaskHandler)
+		// Защищенные маршруты (с аутентификацией)
+		protected := v1Group.Group("")
+		protected.Use(middleware.AuthMiddleware(app.Config.AuthServiceURL, app.Redis, app.Logger))
+		{
+			// Tasks
+			protected.GET("/tasks", app.TaskHandler.GetTasks)
+			protected.POST("/tasks", app.TaskHandler.CreateTask)
+			protected.GET("/tasks/:id", app.TaskHandler.GetTask)
+			protected.PUT("/tasks/:id", app.TaskHandler.UpdateTask)
+			protected.DELETE("/tasks/:id", app.TaskHandler.DeleteTask)
 
-	// WebSocket endpoint
-	app.Router.GET("/ws", app.handleWebSocket)
+			// Meetings
+			protected.GET("/meetings", app.MeetingService.GetMeetings)
+			protected.POST("/meetings", app.MeetingService.CreateMeeting)
+			protected.GET("/meetings/:id", app.MeetingService.GetMeeting)
+			protected.PUT("/meetings/:id", app.MeetingService.UpdateMeeting)
+			protected.DELETE("/meetings/:id", app.MeetingService.DeleteMeeting)
 
-	// Health check
-	app.Router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":    "ok",
-			"timestamp": time.Now().Unix(),
-			"service":   "task-service",
-			"version":   "1.0.0",
-		})
-	})
+			// Important Dates
+			protected.GET("/important-dates", app.ImportantDateService.GetImportantDates)
+			protected.POST("/important-dates", app.ImportantDateService.CreateImportantDate)
+			protected.GET("/important-dates/:id", app.ImportantDateService.GetImportantDate)
+			protected.PUT("/important-dates/:id", app.ImportantDateService.UpdateImportantDate)
+			protected.DELETE("/important-dates/:id", app.ImportantDateService.DeleteImportantDate)
 
-	// Metrics endpoint для Prometheus
-	app.Router.GET("/metrics", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"service": "task-service",
-			"metrics": map[string]interface{}{
-				"uptime":  time.Since(app.StartTime).Seconds(),
-				"version": "1.0.0",
-			},
-		})
-	})
+			// Integrations
+			protected.GET("/integrations", app.IntegrationService.GetExternalIntegrations)
+			protected.POST("/integrations", app.IntegrationService.CreateExternalIntegration)
+			protected.GET("/integrations/:id", app.IntegrationService.GetExternalIntegration)
+			protected.PUT("/integrations/:id", app.IntegrationService.UpdateExternalIntegration)
+			protected.DELETE("/integrations/:id", app.IntegrationService.DeleteExternalIntegration)
+			protected.POST("/integrations/:id/sync", app.IntegrationService.SyncExternalData)
+
+			// Contacts
+			protected.GET("/contacts", app.ContactService.GetContacts)
+			protected.POST("/contacts", app.ContactService.CreateContact)
+			protected.GET("/contacts/:id", app.ContactService.GetContact)
+			protected.PUT("/contacts/:id", app.ContactService.UpdateContact)
+			protected.DELETE("/contacts/:id", app.ContactService.DeleteContact)
+
+			// Comments
+			protected.GET("/tasks/:taskId/comments", app.TaskHandler.GetTaskComments)
+			protected.POST("/tasks/:taskId/comments", app.TaskHandler.CreateTaskComment)
+			protected.PUT("/tasks/:taskId/comments/:commentId", app.TaskHandler.UpdateTaskComment)
+			protected.DELETE("/tasks/:taskId/comments/:commentId", app.TaskHandler.DeleteTaskComment)
+
+			// Subscriptions
+			protected.GET("/subscriptions", app.TaskHandler.GetSubscriptions)
+			protected.POST("/subscriptions", app.TaskHandler.CreateSubscription)
+			protected.DELETE("/subscriptions/:id", app.TaskHandler.DeleteSubscription)
+
+			// Google Calendar
+			protected.GET("/google-calendar/auth", app.TaskHandler.GoogleCalendarAuth)
+			protected.GET("/google-calendar/callback", app.TaskHandler.GoogleCalendarCallback)
+			protected.POST("/google-calendar/sync", app.TaskHandler.GoogleCalendarSync)
+
+			// WebSocket
+			protected.GET("/ws", app.handleWebSocket)
+
+			// Analytics
+			protected.GET("/analytics/tasks", app.TaskHandler.GetTaskAnalytics)
+			protected.GET("/analytics/meetings", app.MeetingService.GetMeetingAnalytics)
+			protected.GET("/analytics/contacts", app.ContactService.GetContactAnalytics)
+
+			// Export
+			protected.GET("/export/tasks", app.TaskHandler.ExportTasks)
+			protected.GET("/export/meetings", app.MeetingService.ExportMeetings)
+		}
+	}
 }
 
 // handleWebSocket обрабатывает WebSocket соединения
@@ -411,7 +461,7 @@ func main() {
 	}
 
 	// Настройка маршрутов
-	setupRoutes(app)
+	app.setupRoutes()
 
 	// Запуск сервера
 	if err := startServer(app, cfg); err != nil {
