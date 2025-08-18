@@ -11,16 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	v1 "github.com/andre/task-service/api/v1"
 	"github.com/andre/task-service/config"
 	"github.com/andre/task-service/handlers"
 	"github.com/andre/task-service/middleware"
-	"github.com/andre/task-service/models"
 	"github.com/andre/task-service/queue"
 	"github.com/andre/task-service/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/streadway/amqp"
 	swaggerFiles "github.com/swaggo/files"
@@ -197,109 +196,11 @@ func (app *App) setupRoutes() {
 		protected := v1Group.Group("")
 		protected.Use(middleware.AuthMiddleware(app.Config.Auth.ServiceURL, app.Redis, app.Logger))
 		{
-			// Tasks
-			protected.GET("/tasks", app.TaskHandler.GetTasks)
-			protected.POST("/tasks", app.TaskHandler.CreateTask)
-			protected.GET("/tasks/:id", app.TaskHandler.GetTask)
-			protected.PUT("/tasks/:id", app.TaskHandler.UpdateTask)
-			protected.DELETE("/tasks/:id", app.TaskHandler.DeleteTask)
-
-			// Meetings
-			protected.GET("/meetings", func(c *gin.Context) {
-				userID := c.GetString("user_id")
-				companyIDStr := c.GetString("company_id")
-
-				// Convert string to UUID
-				companyID, err := uuid.Parse(companyIDStr)
-				if err != nil {
-					c.JSON(400, gin.H{"error": "Invalid company ID format"})
-					return
-				}
-
-				// Call service method here
-				meetings, err := app.MeetingService.GetMeetings(c.Request.Context(), userID, companyID, nil)
-				if err != nil {
-					c.JSON(500, gin.H{"error": err.Error()})
-					return
-				}
-				c.JSON(200, meetings)
-			})
-			protected.POST("/meetings", func(c *gin.Context) {
-				userID := c.GetString("user_id")
-				companyIDStr := c.GetString("company_id")
-
-				// Convert string to UUID
-				companyID, err := uuid.Parse(companyIDStr)
-				if err != nil {
-					c.JSON(400, gin.H{"error": "Invalid company ID format"})
-					return
-				}
-
-				var meeting models.Meeting
-				if err := c.ShouldBindJSON(&meeting); err != nil {
-					c.JSON(400, gin.H{"error": err.Error()})
-					return
-				}
-				result, err := app.MeetingService.CreateMeeting(c.Request.Context(), userID, companyID, &meeting)
-				if err != nil {
-					c.JSON(500, gin.H{"error": err.Error()})
-					return
-				}
-				c.JSON(201, result)
-			})
-			protected.GET("/meetings/:id", app.TaskHandler.GetTask)       // Use existing handler temporarily
-			protected.PUT("/meetings/:id", app.TaskHandler.UpdateTask)    // Use existing handler temporarily
-			protected.DELETE("/meetings/:id", app.TaskHandler.DeleteTask) // Use existing handler temporarily
-
-			// Important Dates - use existing task handlers temporarily
-			protected.GET("/important-dates", app.TaskHandler.GetTasks)
-			protected.POST("/important-dates", app.TaskHandler.CreateTask)
-			protected.GET("/important-dates/:id", app.TaskHandler.GetTask)
-			protected.PUT("/important-dates/:id", app.TaskHandler.UpdateTask)
-			protected.DELETE("/important-dates/:id", app.TaskHandler.DeleteTask)
-
-			// Integrations - use existing task handlers temporarily
-			protected.GET("/integrations", app.TaskHandler.GetTasks)
-			protected.POST("/integrations", app.TaskHandler.CreateTask)
-			protected.GET("/integrations/:id", app.TaskHandler.GetTask)
-			protected.PUT("/integrations/:id", app.TaskHandler.UpdateTask)
-			protected.DELETE("/integrations/:id", app.TaskHandler.DeleteTask)
-			protected.POST("/integrations/:id/sync", app.TaskHandler.CreateTask)
-
-			// Contacts - use existing task handlers temporarily
-			protected.GET("/contacts", app.TaskHandler.GetTasks)
-			protected.POST("/contacts", app.TaskHandler.CreateTask)
-			protected.GET("/contacts/:id", app.TaskHandler.GetTask)
-			protected.PUT("/contacts/:id", app.TaskHandler.UpdateTask)
-			protected.DELETE("/contacts/:id", app.TaskHandler.DeleteTask)
-
-			// Comments - use existing task handlers temporarily
-			protected.GET("/tasks/:taskId/comments", app.TaskHandler.GetTasks)
-			protected.POST("/tasks/:taskId/comments", app.TaskHandler.CreateTask)
-			protected.PUT("/tasks/:taskId/comments/:commentId", app.TaskHandler.UpdateTask)
-			protected.DELETE("/tasks/:taskId/comments/:commentId", app.TaskHandler.DeleteTask)
-
-			// Subscriptions - use existing task handlers temporarily
-			protected.GET("/subscriptions", app.TaskHandler.GetTasks)
-			protected.POST("/subscriptions", app.TaskHandler.CreateTask)
-			protected.DELETE("/subscriptions/:id", app.TaskHandler.DeleteTask)
-
-			// Google Calendar - use existing task handlers temporarily
-			protected.GET("/google-calendar/auth", app.TaskHandler.GetTasks)
-			protected.GET("/google-calendar/callback", app.TaskHandler.GetTasks)
-			protected.POST("/google-calendar/sync", app.TaskHandler.CreateTask)
+			// Используем единую структуру маршрутов из v1.SetupRoutes
+			v1.SetupRoutes(app.Router, app.TaskHandler)
 
 			// WebSocket
 			protected.GET("/ws", app.handleWebSocket)
-
-			// Analytics - use existing task handlers temporarily
-			protected.GET("/analytics/tasks", app.TaskHandler.GetTasks)
-			protected.GET("/analytics/meetings", app.TaskHandler.GetTasks)
-			protected.GET("/analytics/contacts", app.TaskHandler.GetTasks)
-
-			// Export - use existing task handlers temporarily
-			protected.GET("/export/tasks", app.TaskHandler.GetTasks)
-			protected.GET("/export/meetings", app.TaskHandler.GetTasks)
 		}
 	}
 }

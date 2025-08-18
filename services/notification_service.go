@@ -170,7 +170,7 @@ func (s *NotificationService) SendContactNotification(ctx context.Context, userI
 // SendBulkNotifications отправляет массовые уведомления
 func (s *NotificationService) SendBulkNotifications(ctx context.Context, notifications []*NotificationData) error {
 	for _, notification := range notifications {
-		if err := s.SendNotification(ctx, notification); err != nil {
+		if _, err := s.SendNotification(ctx, notification); err != nil {
 			s.logger.Error("Failed to send bulk notification",
 				zap.String("user_id", notification.UserID),
 				zap.String("type", notification.Type),

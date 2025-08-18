@@ -24,12 +24,11 @@ func NewTaskHandler(service *services.TaskService, cfg config.Config) *TaskHandl
 
 func (h *TaskHandler) getErrorMessage(key string) string {
 	messages := map[string]map[string]string{
-		"invalid_input":        {"en": "Invalid input", "ru": "Неверный ввод"},
-		"permission_denied":    {"en": "Permission denied", "ru": "Доступ запрещен"},
-		"task_not_found":       {"en": "Task not found", "ru": "Задача не найдена"},
-		"server_error":         {"en": "Server error", "ru": "Ошибка сервера"},
-		"user_not_found":       {"en": "User not found", "ru": "Пользователь не найден"},
-		"subscription_invalid": {"en": "Cannot create task: trial ended or subscription unpaid", "ru": "Невозможно создать задачу: пробный период закончился или подписка не оплачена"},
+		"invalid_input":     {"en": "Invalid input", "ru": "Неверный ввод"},
+		"permission_denied": {"en": "Permission denied", "ru": "Доступ запрещен"},
+		"task_not_found":    {"en": "Task not found", "ru": "Задача не найдена"},
+		"server_error":      {"en": "Server error", "ru": "Ошибка сервера"},
+		"user_not_found":    {"en": "User not found", "ru": "Пользователь не найден"},
 	}
 	lang := h.Config.Language
 	if msg, ok := messages[key][lang]; ok {
@@ -66,16 +65,6 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	}
 
 	userID := c.GetString("user_id")
-	// Check subscription status
-	isValid, err := h.Service.CheckSubscriptionStatus(c.Request.Context(), userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
-		return
-	}
-	if !isValid {
-		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("subscription_invalid")})
-		return
-	}
 
 	taskInput.ID = uuid.New()
 	taskInput.CreatedAt = time.Now()
@@ -111,17 +100,6 @@ func (h *TaskHandler) CreateTaskWithPrediction(c *gin.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input") + ": " + err.Error()})
-		return
-	}
-
-	// Check subscription status
-	isValid, err := h.Service.CheckSubscriptionStatus(c.Request.Context(), userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
-		return
-	}
-	if !isValid {
-		c.JSON(http.StatusForbidden, gin.H{"error": h.getErrorMessage("subscription_invalid")})
 		return
 	}
 
@@ -346,7 +324,7 @@ func (h *TaskHandler) AddComment(c *gin.Context) {
 	var input struct {
 		Text string `json:"text"`
 	}
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := c.ShouldBindJSON(&input); err != nil || input.Text == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
 		return
 	}
@@ -358,6 +336,43 @@ func (h *TaskHandler) AddComment(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, comment)
+}
+
+// GetComment godoc
+// @Summary Get a comment
+// @Description Retrieve a specific comment by ID for a task
+// @Tags tasks
+// @Produce json
+// @Param taskId path string true "Task ID"
+// @Param commentId path string true "Comment ID"
+// @Success 200 {object} models.Comment
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Router /tasks/{taskId}/comments/{commentId} [get]
+func (h *TaskHandler) GetComment(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("taskId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+	commentID, err := uuid.Parse(c.Param("commentId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	comments, err := h.Service.GetTaskComments(c.Request.Context(), taskID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+	for _, cm := range comments {
+		if cm.ID == commentID {
+			c.JSON(http.StatusOK, cm)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "Comment not found"})
 }
 
 // GenerateReport godoc
@@ -571,6 +586,32 @@ func (h *TaskHandler) UpdateComment(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, comment)
+}
+
+// GetTaskComments godoc
+// @Summary Get task comments
+// @Description Retrieve all comments for a specific task
+// @Tags tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {array} models.Comment
+// @Failure 400 {object} map[string]string "error response"
+// @Failure 404 {object} map[string]string "error response"
+// @Router /tasks/{id}/comments [get]
+func (h *TaskHandler) GetTaskComments(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": h.getErrorMessage("invalid_input")})
+		return
+	}
+
+	comments, err := h.Service.GetTaskComments(c.Request.Context(), taskID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
+		return
+	}
+
+	c.JSON(http.StatusOK, comments)
 }
 
 // DeleteComment godoc

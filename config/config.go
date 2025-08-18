@@ -10,13 +10,15 @@ import (
 
 // Config структура конфигурации приложения
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	RabbitMQ RabbitMQConfig
-	Auth     AuthConfig
-	Logging  LoggingConfig
-	JWT      JWTConfig
+	Server              ServerConfig
+	Database            DatabaseConfig
+	Redis               RedisConfig
+	RabbitMQ            RabbitMQConfig
+	Auth                AuthConfig
+	Logging             LoggingConfig
+	JWT                 JWTConfig
+	Language            string
+	NotificationService NotificationServiceConfig
 }
 
 // ServerConfig конфигурация сервера
@@ -108,14 +110,14 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:         getIntEnv("SERVER_PORT", 8009),
+			Port:         getStringEnv("SERVER_PORT", "8009"),
 			Host:         getStringEnv("SERVER_HOST", "0.0.0.0"),
 			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 30*time.Second),
 			WriteTimeout: getDurationEnv("SERVER_WRITE_TIMEOUT", 30*time.Second),
 		},
 		Database: DatabaseConfig{
 			Host:            getStringEnv("DB_HOST", "localhost"),
-			Port:            getIntEnv("DB_PORT", 5432),
+			Port:            getStringEnv("DB_PORT", "5432"),
 			User:            getStringEnv("DB_USER", "postgres"),
 			Password:        getStringEnv("DB_PASSWORD", "password"),
 			DBName:          getStringEnv("DB_NAME", "task_service"),
@@ -126,7 +128,7 @@ func Load() (*Config, error) {
 		},
 		Redis: RedisConfig{
 			Host:     getStringEnv("REDIS_HOST", "localhost"),
-			Port:     getIntEnv("REDIS_PORT", 6379),
+			Port:     getStringEnv("REDIS_PORT", "6379"),
 			Password: getStringEnv("REDIS_PASSWORD", ""),
 			DB:       getIntEnv("REDIS_DB", 0),
 		},
@@ -146,6 +148,12 @@ func Load() (*Config, error) {
 		},
 		Logging: LoggingConfig{
 			Level: getStringEnv("LOG_LEVEL", "info"),
+		},
+		Language: getStringEnv("LANGUAGE", "en"),
+		NotificationService: NotificationServiceConfig{
+			URL:     getStringEnv("NOTIFICATION_SERVICE_URL", "http://notification-service:8000"),
+			APIKey:  getStringEnv("NOTIFICATION_SERVICE_API_KEY", "default-api-key"),
+			Timeout: getDurationEnv("NOTIFICATION_SERVICE_TIMEOUT", 30*time.Second),
 		},
 	}
 

@@ -29,7 +29,7 @@ func AuthMiddleware(cfg config.Config) gin.HandlerFunc {
 		}
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		req, err := http.NewRequest("GET", cfg.AuthService+"/profile", nil)
+		req, err := http.NewRequest("GET", cfg.Auth.ServiceURL+"/profile", nil)
 		if err != nil {
 			log.Printf("Failed to create request to auth-service: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})

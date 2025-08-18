@@ -26,7 +26,7 @@ type TaskAction struct {
 }
 
 func (qs *QueueService) StartConsumer() {
-	conn, err := amqp.Dial(qs.Config.RabbitMQ)
+	conn, err := amqp.Dial(qs.Config.RabbitMQ.URL)
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}

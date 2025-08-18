@@ -411,11 +411,8 @@ func (s *QueueService) GetQueueStats() (map[string]interface{}, error) {
 		}
 
 		stats[queueName] = map[string]interface{}{
-			"messages":    queue.Messages,
-			"consumers":   queue.Consumers,
-			"durable":     queue.Durable,
-			"auto_delete": queue.AutoDelete,
-			"exclusive":   queue.Exclusive,
+			"messages":  queue.Messages,
+			"consumers": queue.Consumers,
 		}
 	}
 

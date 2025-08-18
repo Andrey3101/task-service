@@ -55,7 +55,7 @@ func (s *IntegrationService) CreateExternalIntegration(ctx context.Context, user
 	s.createIntegrationLog(integration.ID, "create", "success", "Integration created successfully", nil)
 
 	// Тестирование подключения
-	go s.testIntegrationConnection(integration)
+	go s.TestIntegrationConnection(integration)
 
 	return integration, nil
 }
@@ -158,7 +158,7 @@ func (s *IntegrationService) UpdateExternalIntegration(ctx context.Context, inte
 
 	// Тестирование подключения если изменились учетные данные
 	if updates.Credentials != existingIntegration.Credentials {
-		go s.testIntegrationConnection(updates)
+		go s.TestIntegrationConnection(updates)
 	}
 
 	return updates, nil
@@ -202,7 +202,6 @@ func (s *IntegrationService) SyncExternalData(ctx context.Context, integrationID
 	}
 
 	// Начало синхронизации
-	startTime := time.Now()
 	s.createIntegrationLog(integrationID, "sync", "warning", "Sync started", nil)
 
 	// Выполнение синхронизации в зависимости от типа
@@ -229,7 +228,6 @@ func (s *IntegrationService) SyncExternalData(ctx context.Context, integrationID
 	}
 
 	// Обновление времени последней синхронизации
-	duration := time.Since(startTime)
 	if err := s.db.Model(integration).Update("last_sync", time.Now()).Error; err != nil {
 		return err
 	}
