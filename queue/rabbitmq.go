@@ -8,7 +8,7 @@ import (
 	"github.com/andre/task-service/models"
 	"github.com/andre/task-service/services"
 	"github.com/google/uuid"
-	"github.com/streadway/amqp"
+	"github.com/rabbitmq/amqp091-go"
 )
 
 type QueueService struct {
@@ -26,7 +26,7 @@ type TaskAction struct {
 }
 
 func (qs *QueueService) StartConsumer() {
-	conn, err := amqp.Dial(qs.Config.RabbitMQ.URL)
+	conn, err := amqp091.Dial(qs.Config.RabbitMQ.URL)
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}

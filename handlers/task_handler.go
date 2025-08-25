@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/andre/task-service/config"
@@ -191,12 +192,18 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 	limit, _ := c.GetQuery("limit")
 	offset, _ := c.GetQuery("offset")
 
-	var dueDate *time.Time
+	var dueDate string
 	if dueDateStr != "" {
 		parsedDate, err := time.Parse("2006-01-02", dueDateStr)
 		if err == nil {
-			dueDate = &parsedDate
+			dueDate = parsedDate.Format("2006-01-02")
 		}
+	}
+
+	// Разбиваем fields на слайс
+	var fieldsSlice []string
+	if fields != "" {
+		fieldsSlice = strings.Split(fields, ",")
 	}
 
 	lim, _ := strconv.Atoi(limit)
@@ -205,7 +212,7 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 	}
 	off, _ := strconv.Atoi(offset)
 
-	tasks, total, err := h.Service.GetTasks(c.Request.Context(), status, dueDate, priority, assigneeID, fields, lim, off)
+	tasks, total, err := h.Service.GetTasks(c.Request.Context(), status, dueDate, priority, assigneeID, fieldsSlice, lim, off)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return
@@ -295,7 +302,7 @@ func (h *TaskHandler) DeleteTask(c *gin.Context) {
 		return
 	}
 
-	if err := h.Service.DeleteTask(c.Request.Context(), id, userID); err != nil {
+	if err := h.Service.DeleteTask(c.Request.Context(), id.String()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
 	}
@@ -988,11 +995,12 @@ func (h *TaskHandler) CreateOnboardingChecklist(c *gin.Context) {
 	}
 
 	userID := c.GetString("user_id")
-	if err := h.Service.CreateOnboardingChecklist(c.Request.Context(), userID); err != nil {
+	checklist, err := h.Service.CreateOnboardingChecklist(c.Request.Context(), userID)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error")})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Onboarding checklist created"})
+	c.JSON(http.StatusOK, gin.H{"message": "Onboarding checklist created", "checklist": checklist})
 }
 
 // CreateRecurringTask godoc
@@ -1025,7 +1033,13 @@ func (h *TaskHandler) CreateRecurringTask(c *gin.Context) {
 	input.CreatedAt = time.Now()
 	input.Status = "pending"
 
-	task, err := h.Service.CreateRecurringTask(c.Request.Context(), userID, &input.Task, input.Recurrence)
+	// Преобразуем Recurrence в строку
+	recurrenceStr := ""
+	if input.Recurrence != nil {
+		recurrenceStr = input.Recurrence.Interval
+	}
+
+	task, err := h.Service.CreateRecurringTask(c.Request.Context(), userID, &input.Task, recurrenceStr)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": h.getErrorMessage("server_error") + ": " + err.Error()})
 		return

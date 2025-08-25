@@ -7,11 +7,24 @@ import (
 	"github.com/andre/task-service/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+// ImportantDateHandler обработчик для важных дат
+type ImportantDateHandler struct {
+	logger *zap.Logger
+}
+
+// NewImportantDateHandler создает новый экземпляр ImportantDateHandler
+func NewImportantDateHandler(logger *zap.Logger) *ImportantDateHandler {
+	return &ImportantDateHandler{
+		logger: logger,
+	}
+}
 
 // CreateImportantDate godoc
 // @Summary Create a new important date
-// @Description Create an important date with reminders
+// @Description Create an important date with reminder settings
 // @Tags important-dates
 // @Accept json
 // @Produce json
@@ -21,34 +34,37 @@ import (
 // @Failure 403 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/important-dates [post]
-func (h *TaskHandler) CreateImportantDate(c *gin.Context) {
-	var date models.ImportantDate
-	if err := c.ShouldBindJSON(&date); err != nil {
+func (h *ImportantDateHandler) CreateImportantDate(c *gin.Context) {
+	var importantDate models.ImportantDate
+	if err := c.ShouldBindJSON(&importantDate); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
 		return
 	}
 
 	// Валидация обязательных полей
-	if date.Title == "" {
+	if importantDate.Title == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Title is required"})
 		return
 	}
 
-	if date.Date.IsZero() {
+	if importantDate.Date.IsZero() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Date is required"})
 		return
 	}
 
 	// Установка значений по умолчанию
-	date.ID = uuid.New()
-	date.UserID = c.GetString("user_id")
-	date.CompanyID = uuid.MustParse(c.GetString("company_id"))
-	date.CreatedAt = time.Now()
-	date.UpdatedAt = time.Now()
+	importantDate.ID = uuid.New()
+	importantDate.UserID = c.GetString("user_id")
+	importantDate.CompanyID = uuid.MustParse(c.GetString("company_id"))
+	importantDate.Type = "other"
+	importantDate.Priority = "medium"
+	importantDate.ReminderDays = []int{1}
+	importantDate.CreatedAt = time.Now()
+	importantDate.UpdatedAt = time.Now()
 
 	// Здесь должна быть логика сохранения в базу данных
-	// Пока возвращаем созданную дату
-	c.JSON(http.StatusCreated, date)
+	// Пока возвращаем созданную важную дату
+	c.JSON(http.StatusCreated, importantDate)
 }
 
 // GetImportantDates godoc
@@ -57,27 +73,40 @@ func (h *TaskHandler) CreateImportantDate(c *gin.Context) {
 // @Tags important-dates
 // @Accept json
 // @Produce json
-// @Param type query string false "Date type filter"
-// @Param priority query string false "Priority filter"
 // @Param start_date query string false "Start date filter (YYYY-MM-DD)"
 // @Param end_date query string false "End date filter (YYYY-MM-DD)"
+// @Param type query string false "Type filter"
+// @Param priority query string false "Priority filter"
 // @Success 200 {array} models.ImportantDate
 // @Failure 400 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/important-dates [get]
-func (h *TaskHandler) GetImportantDates(c *gin.Context) {
+func (h *ImportantDateHandler) GetImportantDates(c *gin.Context) {
 	userID := c.GetString("user_id")
 	companyID := c.GetString("company_id")
 
 	// Получение параметров фильтрации (пока не используются, но будут для фильтрации)
-	_ = c.Query("type")
-	_ = c.Query("priority")
 	_ = c.Query("start_date")
 	_ = c.Query("end_date")
+	_ = c.Query("type")
+	_ = c.Query("priority")
 
 	// Здесь должна быть логика получения важных дат из базы данных
 	// Пока возвращаем моковые данные
-	dates := []models.ImportantDate{
+	importantDates := []models.ImportantDate{
+		{
+			ID:           uuid.New(),
+			UserID:       userID,
+			CompanyID:    uuid.MustParse(companyID),
+			Title:        "День рождения клиента",
+			Description:  "Поздравить клиента с днем рождения",
+			Date:         time.Now().AddDate(0, 0, 7),
+			Type:         "birthday",
+			Priority:     "medium",
+			ReminderDays: []int{7, 1},
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		},
 		{
 			ID:           uuid.New(),
 			UserID:       userID,
@@ -91,27 +120,14 @@ func (h *TaskHandler) GetImportantDates(c *gin.Context) {
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
 		},
-		{
-			ID:           uuid.New(),
-			UserID:       userID,
-			CompanyID:    uuid.MustParse(companyID),
-			Title:        "День рождения клиента",
-			Description:  "Иван Иванов",
-			Date:         time.Now().AddDate(0, 0, 15),
-			Type:         "birthday",
-			Priority:     "medium",
-			ReminderDays: []int{7, 1},
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-		},
 	}
 
-	c.JSON(http.StatusOK, dates)
+	c.JSON(http.StatusOK, importantDates)
 }
 
 // GetImportantDate godoc
 // @Summary Get important date by ID
-// @Description Get detailed information about a specific important date
+// @Description Get important date details by ID
 // @Tags important-dates
 // @Accept json
 // @Produce json
@@ -121,15 +137,9 @@ func (h *TaskHandler) GetImportantDates(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/important-dates/{id} [get]
-func (h *TaskHandler) GetImportantDate(c *gin.Context) {
+func (h *ImportantDateHandler) GetImportantDate(c *gin.Context) {
 	dateID := c.Param("id")
 	userID := c.GetString("user_id")
-
-	// Валидация UUID
-	if _, err := uuid.Parse(dateID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date ID format"})
-		return
-	}
 
 	// Здесь должна быть логика получения важной даты из базы данных
 	// Пока возвращаем моковые данные
@@ -152,7 +162,7 @@ func (h *TaskHandler) GetImportantDate(c *gin.Context) {
 
 // UpdateImportantDate godoc
 // @Summary Update important date
-// @Description Update important date information
+// @Description Update important date details
 // @Tags important-dates
 // @Accept json
 // @Produce json
@@ -160,45 +170,46 @@ func (h *TaskHandler) GetImportantDate(c *gin.Context) {
 // @Param date body models.ImportantDate true "Updated important date data"
 // @Success 200 {object} models.ImportantDate
 // @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/important-dates/{id} [put]
-func (h *TaskHandler) UpdateImportantDate(c *gin.Context) {
+func (h *ImportantDateHandler) UpdateImportantDate(c *gin.Context) {
 	dateID := c.Param("id")
 	userID := c.GetString("user_id")
 
-	// Валидация UUID
-	if _, err := uuid.Parse(dateID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date ID format"})
+	// Валидация существования важной даты
+	if dateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Date ID is required"})
 		return
 	}
 
-	var date models.ImportantDate
-	if err := c.ShouldBindJSON(&date); err != nil {
+	var importantDate models.ImportantDate
+	if err := c.ShouldBindJSON(&importantDate); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
 		return
 	}
 
 	// Валидация обязательных полей
-	if date.Title == "" {
+	if importantDate.Title == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Title is required"})
 		return
 	}
 
-	if date.Date.IsZero() {
+	if importantDate.Date.IsZero() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Date is required"})
 		return
 	}
 
 	// Обновление полей
-	date.ID = uuid.MustParse(dateID)
-	date.UserID = userID
-	date.CompanyID = uuid.MustParse(c.GetString("company_id"))
-	date.UpdatedAt = time.Now()
+	importantDate.ID = uuid.MustParse(dateID)
+	importantDate.UserID = userID
+	importantDate.CompanyID = uuid.MustParse(c.GetString("company_id"))
+	importantDate.UpdatedAt = time.Now()
 
 	// Здесь должна быть логика обновления в базе данных
 	// Пока возвращаем обновленную дату
-	c.JSON(http.StatusOK, date)
+	c.JSON(http.StatusOK, importantDate)
 }
 
 // DeleteImportantDate godoc
@@ -213,7 +224,7 @@ func (h *TaskHandler) UpdateImportantDate(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/important-dates/{id} [delete]
-func (h *TaskHandler) DeleteImportantDate(c *gin.Context) {
+func (h *ImportantDateHandler) DeleteImportantDate(c *gin.Context) {
 	dateID := c.Param("id")
 
 	// Валидация UUID

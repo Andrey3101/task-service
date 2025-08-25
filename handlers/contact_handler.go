@@ -7,11 +7,24 @@ import (
 	"github.com/andre/task-service/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+// ContactHandler обработчик для контактов
+type ContactHandler struct {
+	logger *zap.Logger
+}
+
+// NewContactHandler создает новый экземпляр ContactHandler
+func NewContactHandler(logger *zap.Logger) *ContactHandler {
+	return &ContactHandler{
+		logger: logger,
+	}
+}
 
 // CreateContact godoc
 // @Summary Create a new contact
-// @Description Create a contact with contact information
+// @Description Create a contact with personal and business information
 // @Tags contacts
 // @Accept json
 // @Produce json
@@ -21,7 +34,7 @@ import (
 // @Failure 403 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/contacts [post]
-func (h *TaskHandler) CreateContact(c *gin.Context) {
+func (h *ContactHandler) CreateContact(c *gin.Context) {
 	var contact models.Contact
 	if err := c.ShouldBindJSON(&contact); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
@@ -38,6 +51,7 @@ func (h *TaskHandler) CreateContact(c *gin.Context) {
 	contact.ID = uuid.New()
 	contact.UserID = c.GetString("user_id")
 	contact.CompanyID = uuid.MustParse(c.GetString("company_id"))
+	contact.Type = "client"
 	contact.Status = "active"
 	contact.CreatedAt = time.Now()
 	contact.UpdatedAt = time.Now()
@@ -53,64 +67,52 @@ func (h *TaskHandler) CreateContact(c *gin.Context) {
 // @Tags contacts
 // @Accept json
 // @Produce json
-// @Param type query string false "Contact type filter"
-// @Param company query string false "Company filter"
+// @Param search query string false "Search query"
+// @Param type query string false "Type filter"
 // @Param status query string false "Status filter"
 // @Success 200 {array} models.Contact
 // @Failure 400 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/contacts [get]
-func (h *TaskHandler) GetContacts(c *gin.Context) {
+func (h *ContactHandler) GetContacts(c *gin.Context) {
 	userID := c.GetString("user_id")
 	companyID := c.GetString("company_id")
 
 	// Получение параметров фильтрации (пока не используются, но будут для фильтрации)
+	_ = c.Query("search")
 	_ = c.Query("type")
-	_ = c.Query("company")
 	_ = c.Query("status")
 
 	// Здесь должна быть логика получения контактов из базы данных
 	// Пока возвращаем моковые данные
 	contacts := []models.Contact{
 		{
-			ID:                     uuid.New(),
-			UserID:                 userID,
-			CompanyID:              uuid.MustParse(companyID),
-			Name:                   "Иван Иванов",
-			Type:                   "client",
-			Email:                  "ivan@example.com",
-			Phone:                  "+7 (999) 123-45-67",
-			Company:                "ООО 'Клиент'",
-			Position:               "Директор",
-			PreferredContactMethod: "email",
-			Timezone:               "Europe/Moscow",
-			WorkingHours:           `{"monday": "9:00-18:00", "tuesday": "9:00-18:00"}`,
-			Notes:                  "Важный клиент",
-			Tags:                   []string{"vip", "regular"},
-			Source:                 "manual",
-			Status:                 "active",
-			CreatedAt:              time.Now(),
-			UpdatedAt:              time.Now(),
+			ID:        uuid.New(),
+			UserID:    userID,
+			CompanyID: uuid.MustParse(companyID),
+			Name:      "Иван Иванов",
+			Email:     "ivan@example.com",
+			Phone:     "+7 (999) 123-45-67",
+			Company:   "ООО Рога и Копыта",
+			Position:  "Директор",
+			Type:      "client",
+			Status:    "active",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		},
 		{
-			ID:                     uuid.New(),
-			UserID:                 userID,
-			CompanyID:              uuid.MustParse(companyID),
-			Name:                   "Петр Петров",
-			Type:                   "supplier",
-			Email:                  "petr@supplier.com",
-			Phone:                  "+7 (999) 987-65-43",
-			Company:                "ООО 'Поставщик'",
-			Position:               "Менеджер по продажам",
-			PreferredContactMethod: "phone",
-			Timezone:               "Europe/Moscow",
-			WorkingHours:           `{"monday": "8:00-17:00", "friday": "8:00-16:00"}`,
-			Notes:                  "Основной поставщик",
-			Tags:                   []string{"reliable", "fast"},
-			Source:                 "website",
-			Status:                 "active",
-			CreatedAt:              time.Now(),
-			UpdatedAt:              time.Now(),
+			ID:        uuid.New(),
+			UserID:    userID,
+			CompanyID: uuid.MustParse(companyID),
+			Name:      "Петр Петров",
+			Email:     "petr@example.com",
+			Phone:     "+7 (999) 765-43-21",
+			Company:   "ИП Петров",
+			Position:  "Бухгалтер",
+			Type:      "contractor",
+			Status:    "active",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		},
 	}
 
@@ -119,7 +121,7 @@ func (h *TaskHandler) GetContacts(c *gin.Context) {
 
 // GetContact godoc
 // @Summary Get contact by ID
-// @Description Get detailed information about a specific contact
+// @Description Get contact details by ID
 // @Tags contacts
 // @Accept json
 // @Produce json
@@ -129,37 +131,25 @@ func (h *TaskHandler) GetContacts(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/contacts/{id} [get]
-func (h *TaskHandler) GetContact(c *gin.Context) {
+func (h *ContactHandler) GetContact(c *gin.Context) {
 	contactID := c.Param("id")
 	userID := c.GetString("user_id")
-
-	// Валидация UUID
-	if _, err := uuid.Parse(contactID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid contact ID format"})
-		return
-	}
 
 	// Здесь должна быть логика получения контакта из базы данных
 	// Пока возвращаем моковые данные
 	contact := models.Contact{
-		ID:                     uuid.MustParse(contactID),
-		UserID:                 userID,
-		CompanyID:              uuid.MustParse(c.GetString("company_id")),
-		Name:                   "Иван Иванов",
-		Type:                   "client",
-		Email:                  "ivan@example.com",
-		Phone:                  "+7 (999) 123-45-67",
-		Company:                "ООО 'Клиент'",
-		Position:               "Директор",
-		PreferredContactMethod: "email",
-		Timezone:               "Europe/Moscow",
-		WorkingHours:           `{"monday": "9:00-18:00", "tuesday": "9:00-18:00"}`,
-		Notes:                  "Важный клиент",
-		Tags:                   []string{"vip", "regular"},
-		Source:                 "manual",
-		Status:                 "active",
-		CreatedAt:              time.Now(),
-		UpdatedAt:              time.Now(),
+		ID:        uuid.MustParse(contactID),
+		UserID:    userID,
+		CompanyID: uuid.MustParse(c.GetString("company_id")),
+		Name:      "Иван Иванов",
+		Email:     "ivan@example.com",
+		Phone:     "+7 (999) 123-45-67",
+		Company:   "ООО Рога и Копыта",
+		Position:  "Директор",
+		Type:      "client",
+		Status:    "active",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 
 	c.JSON(http.StatusOK, contact)
@@ -167,7 +157,7 @@ func (h *TaskHandler) GetContact(c *gin.Context) {
 
 // UpdateContact godoc
 // @Summary Update contact
-// @Description Update contact information
+// @Description Update contact details
 // @Tags contacts
 // @Accept json
 // @Produce json
@@ -175,16 +165,17 @@ func (h *TaskHandler) GetContact(c *gin.Context) {
 // @Param contact body models.Contact true "Updated contact data"
 // @Success 200 {object} models.Contact
 // @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/contacts/{id} [put]
-func (h *TaskHandler) UpdateContact(c *gin.Context) {
+func (h *ContactHandler) UpdateContact(c *gin.Context) {
 	contactID := c.Param("id")
 	userID := c.GetString("user_id")
 
-	// Валидация UUID
-	if _, err := uuid.Parse(contactID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid contact ID format"})
+	// Валидация существования контакта
+	if contactID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Contact ID is required"})
 		return
 	}
 
@@ -213,22 +204,23 @@ func (h *TaskHandler) UpdateContact(c *gin.Context) {
 
 // DeleteContact godoc
 // @Summary Delete contact
-// @Description Delete a contact by ID
+// @Description Delete contact by ID
 // @Tags contacts
 // @Accept json
 // @Produce json
 // @Param id path string true "Contact ID"
 // @Success 200 {object} map[string]string "success response"
 // @Failure 400 {object} map[string]string "error response"
+// @Failure 403 {object} map[string]string "error response"
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/contacts/{id} [delete]
-func (h *TaskHandler) DeleteContact(c *gin.Context) {
+func (h *ContactHandler) DeleteContact(c *gin.Context) {
 	contactID := c.Param("id")
 
-	// Валидация UUID
-	if _, err := uuid.Parse(contactID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid contact ID format"})
+	// Валидация существования контакта
+	if contactID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Contact ID is required"})
 		return
 	}
 

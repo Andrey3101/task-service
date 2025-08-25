@@ -1,13 +1,32 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/andre/task-service/models"
+	"github.com/andre/task-service/services"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+// IntegrationHandler обработчик для интеграций
+type IntegrationHandler struct {
+	integrationService *services.IntegrationService
+	calendarService    *services.CalendarService
+	logger             *zap.Logger
+}
+
+// NewIntegrationHandler создает новый экземпляр IntegrationHandler
+func NewIntegrationHandler(integrationService *services.IntegrationService, calendarService *services.CalendarService, logger *zap.Logger) *IntegrationHandler {
+	return &IntegrationHandler{
+		integrationService: integrationService,
+		calendarService:    calendarService,
+		logger:             logger,
+	}
+}
 
 // CreateExternalIntegration godoc
 // @Summary Create a new external integration
@@ -21,7 +40,7 @@ import (
 // @Failure 403 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations [post]
-func (h *TaskHandler) CreateExternalIntegration(c *gin.Context) {
+func (h *IntegrationHandler) CreateExternalIntegration(c *gin.Context) {
 	var integration models.ExternalIntegration
 	if err := c.ShouldBindJSON(&integration); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
@@ -65,7 +84,7 @@ func (h *TaskHandler) CreateExternalIntegration(c *gin.Context) {
 // @Failure 400 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations [get]
-func (h *TaskHandler) GetExternalIntegrations(c *gin.Context) {
+func (h *IntegrationHandler) GetExternalIntegrations(c *gin.Context) {
 	userID := c.GetString("user_id")
 	companyID := c.GetString("company_id")
 
@@ -120,7 +139,7 @@ func (h *TaskHandler) GetExternalIntegrations(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations/{id} [get]
-func (h *TaskHandler) GetExternalIntegration(c *gin.Context) {
+func (h *IntegrationHandler) GetExternalIntegration(c *gin.Context) {
 	integrationID := c.Param("id")
 	userID := c.GetString("user_id")
 
@@ -162,7 +181,7 @@ func (h *TaskHandler) GetExternalIntegration(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations/{id} [put]
-func (h *TaskHandler) UpdateExternalIntegration(c *gin.Context) {
+func (h *IntegrationHandler) UpdateExternalIntegration(c *gin.Context) {
 	integrationID := c.Param("id")
 	userID := c.GetString("user_id")
 
@@ -212,7 +231,7 @@ func (h *TaskHandler) UpdateExternalIntegration(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations/{id} [delete]
-func (h *TaskHandler) DeleteExternalIntegration(c *gin.Context) {
+func (h *IntegrationHandler) DeleteExternalIntegration(c *gin.Context) {
 	integrationID := c.Param("id")
 
 	// Валидация UUID
@@ -238,7 +257,7 @@ func (h *TaskHandler) DeleteExternalIntegration(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/integrations/{id}/sync [post]
-func (h *TaskHandler) SyncExternalData(c *gin.Context) {
+func (h *IntegrationHandler) SyncExternalData(c *gin.Context) {
 	integrationID := c.Param("id")
 
 	// Валидация UUID
@@ -253,5 +272,144 @@ func (h *TaskHandler) SyncExternalData(c *gin.Context) {
 		"message":      "Data synchronized successfully",
 		"sync_time":    time.Now(),
 		"items_synced": 15,
+	})
+}
+
+// ConnectCalendar подключает локальный календарь
+func (h *IntegrationHandler) ConnectCalendar(c *gin.Context) {
+	var request struct {
+		UserID    string                 `json:"user_id" binding:"required"`
+		CompanyID uuid.UUID              `json:"company_id" binding:"required"`
+		Settings  map[string]interface{} `json:"settings"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Создаем интеграцию с локальным календарем
+	integration := &models.ExternalIntegration{
+		ID:           uuid.New(),
+		UserID:       request.UserID,
+		CompanyID:    request.CompanyID,
+		Provider:     "local_calendar", // Заменяем google_calendar на local_calendar
+		Type:         "calendar",
+		Credentials:  "{}", // Пустые учетные данные для локального календаря
+		IsActive:     true,
+		LastSync:     time.Now(),
+		SyncInterval: 60,
+		Settings:     "{}",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+
+	createdIntegration, err := h.integrationService.CreateExternalIntegration(context.Background(), request.UserID, request.CompanyID, integration)
+	if err != nil {
+		h.logger.Error("Failed to create local calendar integration", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create integration"})
+		return
+	}
+
+	// Создаем настройки календаря по умолчанию
+	settings := &models.CalendarSettings{
+		ID:                uuid.New(),
+		UserID:            request.UserID,
+		DefaultView:       "month",
+		WorkingHoursStart: "09:00",
+		WorkingHoursEnd:   "18:00",
+		WeekStart:         "monday",
+		TimeZone:          "UTC",
+		ShowWeekends:      true,
+		ShowHolidays:      true,
+		AutoSyncTasks:     true,
+		AutoSyncMeetings:  true,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+
+	if err := h.calendarService.UpdateUserCalendarSettings(context.Background(), settings); err != nil {
+		h.logger.Error("Failed to create calendar settings", zap.Error(err))
+		// Не прерываем процесс, так как интеграция уже создана
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message":     "Local calendar connected successfully",
+		"integration": createdIntegration,
+		"settings":    settings,
+	})
+}
+
+// DisconnectCalendar отключает локальный календарь
+func (h *IntegrationHandler) DisconnectCalendar(c *gin.Context) {
+	integrationID := c.Param("id")
+	userID := c.Query("user_id")
+
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id is required"})
+		return
+	}
+
+	// Валидация UUID
+	integrationUUID, err := uuid.Parse(integrationID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid integration ID format"})
+		return
+	}
+
+	// Получаем интеграцию напрямую из базы данных для проверки прав доступа
+	var integration models.ExternalIntegration
+	if err := h.integrationService.DB.Where("id = ?", integrationUUID).First(&integration).Error; err != nil {
+		h.logger.Error("Failed to get integration", zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Integration not found"})
+		return
+	}
+
+	// Проверяем права доступа
+	if integration.UserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
+	}
+
+	if err := h.integrationService.DeleteExternalIntegration(context.Background(), integrationUUID, userID, integration.CompanyID); err != nil {
+		h.logger.Error("Failed to delete calendar integration", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to disconnect calendar"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Calendar disconnected successfully"})
+}
+
+// SyncCalendar синхронизирует локальный календарь
+func (h *IntegrationHandler) SyncCalendar(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	// Логируем начало синхронизации
+	log := &models.CalendarSyncLog{
+		ID:         uuid.New(),
+		UserID:     userID,
+		Action:     "manual_sync",
+		Status:     "in_progress",
+		ItemsCount: 0,
+		CreatedAt:  time.Now(),
+	}
+
+	startTime := time.Now()
+
+	// Выполняем синхронизацию
+	// Здесь можно добавить логику синхронизации с внешними источниками
+	// Пока что просто логируем успешную синхронизацию
+
+	log.Status = "success"
+	log.ItemsCount = 0
+	log.Duration = int(time.Since(startTime).Milliseconds())
+
+	if err := h.calendarService.LogSyncAction(context.Background(), log); err != nil {
+		h.logger.Error("Failed to log sync action", zap.Error(err))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Calendar synchronized successfully",
+		"sync_log": log,
 	})
 }

@@ -8,15 +8,15 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Config структура конфигурации приложения
+// Config основная конфигурация приложения
 type Config struct {
 	Server              ServerConfig
 	Database            DatabaseConfig
 	Redis               RedisConfig
 	RabbitMQ            RabbitMQConfig
 	Auth                AuthConfig
-	Logging             LoggingConfig
 	JWT                 JWTConfig
+	Logging             LoggingConfig
 	Language            string
 	NotificationService NotificationServiceConfig
 }
@@ -27,7 +27,6 @@ type ServerConfig struct {
 	Host         string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
 }
 
 // DatabaseConfig конфигурация базы данных
@@ -45,23 +44,16 @@ type DatabaseConfig struct {
 
 // RedisConfig конфигурация Redis
 type RedisConfig struct {
-	Host         string
-	Port         string
-	Password     string
-	DB           int
-	PoolSize     int
-	MinIdleConns int
-	MaxRetries   int
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
+	Host     string
+	Port     string
+	Password string
+	DB       int
 }
 
 // RabbitMQConfig конфигурация RabbitMQ
 type RabbitMQConfig struct {
 	URL        string
 	MaxRetries int
-	RetryDelay time.Duration
 }
 
 // NotificationServiceConfig конфигурация сервиса уведомлений
@@ -69,14 +61,6 @@ type NotificationServiceConfig struct {
 	URL     string
 	APIKey  string
 	Timeout time.Duration
-}
-
-// GoogleCalendarConfig конфигурация Google Calendar
-type GoogleCalendarConfig struct {
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	Scopes       []string
 }
 
 // LoggingConfig конфигурация логирования
@@ -133,7 +117,8 @@ func Load() (*Config, error) {
 			DB:       getIntEnv("REDIS_DB", 0),
 		},
 		RabbitMQ: RabbitMQConfig{
-			URL: getStringEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+			URL:        getStringEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+			MaxRetries: getIntEnv("RABBITMQ_MAX_RETRIES", 3),
 		},
 		Auth: AuthConfig{
 			ServiceURL: getStringEnv("AUTH_SERVICE_URL", "http://auth-service:8000"),
@@ -143,7 +128,7 @@ func Load() (*Config, error) {
 			Secret:           getStringEnv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
 			EncryptionKey:    getStringEnv("JWT_ENCRYPTION_KEY", "your-encryption-key-32-chars"),
 			RotationInterval: getIntEnv("JWT_ROTATION_INTERVAL", 3600),
-			RoleCacheTTL:     getDurationEnv("JWT_ROLE_CACHE_TTL", 24*time.Hour),
+			RoleCacheTTL:     getDurationEnv("JWT_ROLE_CACHE_TL", 24*time.Hour),
 			BlacklistTTL:     getDurationEnv("JWT_BLACKLIST_TTL", 7*24*time.Hour),
 		},
 		Logging: LoggingConfig{
@@ -171,13 +156,12 @@ func (c *DatabaseConfig) GetDSN() string {
 }
 
 // GetRedisAddr возвращает адрес Redis
-func (c *RedisConfig) GetRedisAddr() string {
+func (c *RedisConfig) GetAddr() string {
 	return c.Host + ":" + c.Port
 }
 
 // Вспомогательные функции для получения переменных окружения
-
-func getEnv(key, defaultValue string) string {
+func getStringEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
@@ -198,13 +182,6 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 		if duration, err := time.ParseDuration(value); err == nil {
 			return duration
 		}
-	}
-	return defaultValue
-}
-
-func getStringEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
 	}
 	return defaultValue
 }

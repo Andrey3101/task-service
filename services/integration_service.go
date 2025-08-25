@@ -12,11 +12,11 @@ import (
 )
 
 type IntegrationService struct {
-	db *gorm.DB
+	DB *gorm.DB
 }
 
 func NewIntegrationService(db *gorm.DB) *IntegrationService {
-	return &IntegrationService{db: db}
+	return &IntegrationService{DB: db}
 }
 
 // CreateExternalIntegration создает новую внешнюю интеграцию
@@ -47,7 +47,7 @@ func (s *IntegrationService) CreateExternalIntegration(ctx context.Context, user
 	integration.UpdatedAt = time.Now()
 
 	// Сохранение в базу данных
-	if err := s.db.Create(integration).Error; err != nil {
+	if err := s.DB.Create(integration).Error; err != nil {
 		return nil, err
 	}
 
@@ -63,7 +63,7 @@ func (s *IntegrationService) CreateExternalIntegration(ctx context.Context, user
 // GetExternalIntegrations получает список внешних интеграций
 func (s *IntegrationService) GetExternalIntegrations(ctx context.Context, userID string, companyID uuid.UUID, filters map[string]interface{}) ([]models.ExternalIntegration, error) {
 	var integrations []models.ExternalIntegration
-	query := s.db.Where("company_id = ?", companyID)
+	query := s.DB.Where("company_id = ?", companyID)
 
 	// Применение фильтров
 	if provider, ok := filters["provider"].(string); ok {
@@ -99,7 +99,7 @@ func (s *IntegrationService) GetExternalIntegrations(ctx context.Context, userID
 // GetExternalIntegration получает внешнюю интеграцию по ID
 func (s *IntegrationService) GetExternalIntegration(ctx context.Context, integrationID uuid.UUID, userID string, companyID uuid.UUID) (*models.ExternalIntegration, error) {
 	var integration models.ExternalIntegration
-	if err := s.db.Where("id = ? AND company_id = ?", integrationID, companyID).First(&integration).Error; err != nil {
+	if err := s.DB.Where("id = ? AND company_id = ?", integrationID, companyID).First(&integration).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("integration not found")
 		}
@@ -149,7 +149,7 @@ func (s *IntegrationService) UpdateExternalIntegration(ctx context.Context, inte
 	updates.UpdatedAt = time.Now()
 
 	// Сохранение изменений
-	if err := s.db.Model(existingIntegration).Updates(updates).Error; err != nil {
+	if err := s.DB.Model(existingIntegration).Updates(updates).Error; err != nil {
 		return nil, err
 	}
 
@@ -173,12 +173,12 @@ func (s *IntegrationService) DeleteExternalIntegration(ctx context.Context, inte
 	}
 
 	// Удаление логов интеграции
-	if err := s.db.Where("integration_id = ?", integrationID).Delete(&models.IntegrationLog{}).Error; err != nil {
+	if err := s.DB.Where("integration_id = ?", integrationID).Delete(&models.IntegrationLog{}).Error; err != nil {
 		return err
 	}
 
 	// Удаление интеграции
-	if err := s.db.Delete(existingIntegration).Error; err != nil {
+	if err := s.DB.Delete(existingIntegration).Error; err != nil {
 		return err
 	}
 
@@ -228,7 +228,7 @@ func (s *IntegrationService) SyncExternalData(ctx context.Context, integrationID
 	}
 
 	// Обновление времени последней синхронизации
-	if err := s.db.Model(integration).Update("last_sync", time.Now()).Error; err != nil {
+	if err := s.DB.Model(integration).Update("last_sync", time.Now()).Error; err != nil {
 		return err
 	}
 
@@ -279,7 +279,7 @@ func (s *IntegrationService) GetIntegrationLogs(ctx context.Context, integration
 	}
 
 	// Получение логов
-	query := s.db.Where("integration_id = ?", integrationID)
+	query := s.DB.Where("integration_id = ?", integrationID)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -335,7 +335,7 @@ func (s *IntegrationService) validateIntegration(integration *models.ExternalInt
 
 func (s *IntegrationService) checkIntegrationUniqueness(ctx context.Context, userID string, companyID uuid.UUID, provider string, integrationType string) error {
 	var count int64
-	err := s.db.Model(&models.ExternalIntegration{}).
+	err := s.DB.Model(&models.ExternalIntegration{}).
 		Where("user_id = ? AND company_id = ? AND provider = ? AND type = ?", userID, companyID, provider, integrationType).
 		Count(&count).Error
 
@@ -368,7 +368,7 @@ func (s *IntegrationService) createIntegrationLog(integrationID uuid.UUID, actio
 		CreatedAt:     time.Now(),
 	}
 
-	s.db.Create(&log)
+	s.DB.Create(&log)
 }
 
 // Методы для синхронизации (заглушки для демонстрации)

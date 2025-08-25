@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/andre/task-service/config"
-	"github.com/streadway/amqp"
+	"github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 )
 
@@ -21,8 +21,8 @@ type QueueMessage struct {
 
 // QueueService сервис для работы с очередями RabbitMQ
 type QueueService struct {
-	conn    *amqp.Connection
-	channel *amqp.Channel
+	conn    *amqp091.Connection
+	channel *amqp091.Channel
 	config  *config.Config
 	logger  *zap.Logger
 }
@@ -30,7 +30,7 @@ type QueueService struct {
 // NewQueueService создает новый сервис очередей
 func NewQueueService(cfg *config.Config, logger *zap.Logger) (*QueueService, error) {
 	// Подключение к RabbitMQ
-	conn, err := amqp.Dial(cfg.RabbitMQ.URL)
+	conn, err := amqp091.Dial(cfg.RabbitMQ.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
@@ -232,10 +232,10 @@ func (s *QueueService) PublishMessage(routingKey string, message *QueueMessage) 
 		routingKey,     // routing key
 		false,          // mandatory
 		false,          // immediate
-		amqp.Publishing{
+		amqp091.Publishing{
 			ContentType:  "application/json",
 			Body:         body,
-			DeliveryMode: amqp.Persistent,
+			DeliveryMode: amqp091.Persistent,
 			Timestamp:    time.Now(),
 		},
 	)

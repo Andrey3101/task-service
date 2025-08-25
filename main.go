@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,11 +18,10 @@ import (
 	"github.com/andre/task-service/middleware"
 	"github.com/andre/task-service/queue"
 	"github.com/andre/task-service/services"
-
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
-	"github.com/streadway/amqp"
+	"github.com/rabbitmq/amqp091-go"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"go.uber.org/zap"
@@ -42,8 +42,8 @@ type App struct {
 	DBConn               *sql.DB
 	DB                   *gorm.DB
 	Redis                *redis.Client
-	RabbitMQ             *amqp.Connection
-	RabbitMQChan         *amqp.Channel
+	RabbitMQ             *amqp091.Connection
+	RabbitMQChan         *amqp091.Channel
 	Router               *gin.Engine
 	TaskService          *services.TaskService
 	MeetingService       *services.MeetingService
@@ -109,71 +109,268 @@ func setupDependencies(cfg *config.Config, logger *zap.Logger) (*App, error) {
 
 	// Подключение к Redis
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:         cfg.Redis.GetRedisAddr(),
-		Password:     cfg.Redis.Password,
-		DB:           cfg.Redis.DB,
-		PoolSize:     cfg.Redis.PoolSize,
-		MinIdleConns: cfg.Redis.MinIdleConns,
-		MaxRetries:   cfg.Redis.MaxRetries,
-		DialTimeout:  cfg.Redis.DialTimeout,
-		ReadTimeout:  cfg.Redis.ReadTimeout,
-		WriteTimeout: cfg.Redis.WriteTimeout,
+		Addr:     cfg.Redis.GetAddr(),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
 	})
 
 	// Проверка подключения к Redis
-	ctx := context.Background()
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
 		logger.Fatal("Failed to connect to Redis", zap.Error(err))
 		return nil, err
 	}
 
 	// Подключение к RabbitMQ
-	rabbitConn, err := amqp.Dial(cfg.RabbitMQ.URL)
+	rabbitMQConn, err := amqp091.Dial(cfg.RabbitMQ.URL)
 	if err != nil {
 		logger.Fatal("Failed to connect to RabbitMQ", zap.Error(err))
 		return nil, err
 	}
 
-	rabbitCh, err := rabbitConn.Channel()
+	rabbitMQChan, err := rabbitMQConn.Channel()
 	if err != nil {
 		logger.Fatal("Failed to open RabbitMQ channel", zap.Error(err))
 		return nil, err
 	}
 
-	// Инициализация Gin
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.Recovery())
-	r.Use(gin.Logger())
-
-	// Создаем App структуру
-	app := &App{
-		Config:       cfg,
-		DBConn:       dbConn,
-		DB:           db,
-		Redis:        redisClient,
-		RabbitMQ:     rabbitConn,
-		RabbitMQChan: rabbitCh,
-		Router:       r,
-		StartTime:    time.Now(),
-		Logger:       logger,
+	// Инициализация сервисов
+	calendarService := services.NewCalendarService(db, redisClient)
+	taskService, err := services.NewTaskService(db, redisClient, calendarService, cfg.RabbitMQ.URL)
+	if err != nil {
+		logger.Fatal("Failed to create task service", zap.Error(err))
+		return nil, err
 	}
 
-	// Инициализация сервисов
-	app.TaskService, _ = services.NewTaskService(db, redisClient, nil, cfg.RabbitMQ.URL)
-	app.MeetingService = services.NewMeetingService(db)
-	app.ImportantDateService = services.NewImportantDateService(db)
-	app.IntegrationService = services.NewIntegrationService(db)
-	app.ContactService = services.NewContactService(db)
-	app.NotificationService = services.NewNotificationService(cfg, logger)
-	app.CacheService = services.NewCacheService(redisClient, logger)
-	app.QueueService, _ = services.NewQueueService(cfg, logger)
-	app.QueueServiceOld = queue.NewQueueService(*cfg, app.TaskService)
+	meetingService := services.NewMeetingService(db)
+	importantDateService := services.NewImportantDateService(db)
+	integrationService := services.NewIntegrationService(db)
+	contactService := services.NewContactService(db)
+	notificationService := services.NewNotificationService(cfg, logger)
+	cacheService := services.NewCacheService(redisClient, logger)
+	queueService, err := services.NewQueueService(cfg, logger)
+	if err != nil {
+		logger.Fatal("Failed to create queue service", zap.Error(err))
+		return nil, err
+	}
 
-	// Инициализация TaskHandler
-	app.TaskHandler = handlers.NewTaskHandler(app.TaskService, *cfg)
+	// Инициализация хендлеров
+	taskHandler := handlers.NewTaskHandler(taskService, *cfg)
+	meetingHandler := handlers.NewMeetingHandler(logger)
+	importantDateHandler := handlers.NewImportantDateHandler(logger)
+	integrationHandler := handlers.NewIntegrationHandler(integrationService, calendarService, logger)
+	contactHandler := handlers.NewContactHandler(logger)
+	calendarHandler := handlers.NewCalendarHandler(calendarService, logger)
 
-	return app, nil
+	// Новые хендлеры для инновационных функций
+	aiHandler := handlers.NewAIHandler(logger)
+	reportHandler := handlers.NewReportHandler(logger)
+	botHandler := handlers.NewBotHandler(logger)
+	vrHandler := handlers.NewVRHandler(logger)
+	mobileHandler := handlers.NewMobileHandler(logger)
+
+	// Создаем notificationHandler для уведомлений
+	notificationHandler := handlers.NewNotificationHandler(logger)
+
+	// Инициализация роутера
+	router := gin.Default()
+	router.Use(gin.Recovery())
+
+	// Настройка CORS
+	router.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
+
+	// API v1 роуты
+	v1 := router.Group("/api/v1")
+	{
+		// Задачи
+		tasks := v1.Group("/tasks")
+		{
+			tasks.POST("/", taskHandler.CreateTask)
+			tasks.GET("/", taskHandler.GetTasks)
+			tasks.GET("/:id", taskHandler.GetTask)
+			tasks.PUT("/:id", taskHandler.UpdateTask)
+			tasks.DELETE("/:id", taskHandler.DeleteTask)
+			tasks.POST("/:id/comments", taskHandler.AddComment)
+		}
+
+		// Встречи
+		meetings := v1.Group("/meetings")
+		{
+			meetings.POST("/", meetingHandler.CreateMeeting)
+			meetings.GET("/", meetingHandler.GetMeetings)
+			meetings.GET("/:id", meetingHandler.GetMeeting)
+			meetings.PUT("/:id", meetingHandler.UpdateMeeting)
+			meetings.DELETE("/:id", meetingHandler.DeleteMeeting)
+		}
+
+		// Важные даты
+		importantDates := v1.Group("/important-dates")
+		{
+			importantDates.POST("/", importantDateHandler.CreateImportantDate)
+			importantDates.GET("/", importantDateHandler.GetImportantDates)
+			importantDates.GET("/:id", importantDateHandler.GetImportantDate)
+			importantDates.PUT("/:id", importantDateHandler.UpdateImportantDate)
+			importantDates.DELETE("/:id", importantDateHandler.DeleteImportantDate)
+		}
+
+		// Интеграции
+		integrations := v1.Group("/integrations")
+		{
+			integrations.POST("/", integrationHandler.CreateExternalIntegration)
+			integrations.GET("/", integrationHandler.GetExternalIntegrations)
+			integrations.GET("/:id", integrationHandler.GetExternalIntegration)
+			integrations.PUT("/:id", integrationHandler.UpdateExternalIntegration)
+			integrations.DELETE("/:id", integrationHandler.DeleteExternalIntegration)
+			integrations.POST("/calendar/connect", integrationHandler.ConnectCalendar)
+			integrations.DELETE("/calendar/:id", integrationHandler.DisconnectCalendar)
+			integrations.POST("/calendar/:user_id/sync", integrationHandler.SyncCalendar)
+		}
+
+		// Контакты
+		contacts := v1.Group("/contacts")
+		{
+			contacts.POST("/", contactHandler.CreateContact)
+			contacts.GET("/", contactHandler.GetContacts)
+			contacts.GET("/:id", contactHandler.GetContact)
+			contacts.PUT("/:id", contactHandler.UpdateContact)
+			contacts.DELETE("/:id", contactHandler.DeleteContact)
+		}
+
+		// Календарь
+		calendar := v1.Group("/calendar")
+		{
+			calendar.POST("/events", calendarHandler.CreateEvent)
+			calendar.GET("/events/:id", calendarHandler.GetEvent)
+			calendar.GET("/events", calendarHandler.GetUserEvents)
+			calendar.PUT("/events/:id", calendarHandler.UpdateEvent)
+			calendar.DELETE("/events/:id", calendarHandler.DeleteEvent)
+			calendar.GET("/settings", calendarHandler.GetUserCalendarSettings)
+			calendar.PUT("/settings", calendarHandler.UpdateUserCalendarSettings)
+			calendar.POST("/events/:id/reminders", calendarHandler.AddReminder)
+			calendar.GET("/tags", calendarHandler.GetUserTags)
+			calendar.POST("/tags", calendarHandler.CreateTag)
+			calendar.POST("/sync/tasks", calendarHandler.SyncTasksToCalendar)
+		}
+
+		// AI и аналитика
+		ai := v1.Group("/ai")
+		{
+			ai.POST("/analyze-productivity", aiHandler.AnalyzeProductivity)
+			ai.GET("/insights", aiHandler.GetInsights)
+			ai.POST("/recommendations", aiHandler.GenerateRecommendations)
+			ai.POST("/predict-tasks", aiHandler.PredictTaskCompletion)
+			ai.GET("/patterns", aiHandler.GetBehaviorPatterns)
+		}
+
+		// Умные уведомления
+		notifications := v1.Group("/notifications")
+		{
+			notifications.GET("/", notificationHandler.GetNotifications)
+			notifications.GET("/:id", notificationHandler.GetNotification)
+			notifications.PUT("/:id/read", notificationHandler.MarkAsRead)
+			notifications.PUT("/:id/priority", notificationHandler.UpdatePriority)
+			notifications.DELETE("/:id", notificationHandler.DeleteNotification)
+			notifications.POST("/batch/read", notificationHandler.MarkBatchAsRead)
+			notifications.GET("/ai/patterns", notificationHandler.GetAIPatterns)
+			notifications.GET("/ai/recommendations", notificationHandler.GetAIRecommendations)
+		}
+
+		// Персональные отчеты
+		reports := v1.Group("/reports")
+		{
+			reports.POST("/", reportHandler.CreateReport)
+			reports.GET("/", reportHandler.GetReports)
+			reports.GET("/:id", reportHandler.GetReport)
+			reports.PUT("/:id", reportHandler.UpdateReport)
+			reports.DELETE("/:id", reportHandler.DeleteReport)
+			reports.POST("/:id/export", reportHandler.ExportReport)
+			reports.POST("/ai/generate", reportHandler.GenerateAIReport)
+			reports.GET("/templates", reportHandler.GetReportTemplates)
+		}
+
+		// Умный бот
+		bot := v1.Group("/bot")
+		{
+			bot.POST("/chat", botHandler.ProcessMessage)
+			bot.GET("/context", botHandler.GetUserContext)
+			bot.POST("/learn", botHandler.LearnFromInteraction)
+			bot.GET("/suggestions", botHandler.GetSuggestions)
+			bot.POST("/actions", botHandler.ExecuteAction)
+		}
+
+		// VR/AR функции
+		vr := v1.Group("/vr")
+		{
+			vr.POST("/boards", vrHandler.CreateBoard)
+			vr.GET("/boards", vrHandler.GetBoards)
+			vr.GET("/boards/:id", vrHandler.GetBoard)
+			vr.PUT("/boards/:id", vrHandler.UpdateBoard)
+			vr.DELETE("/boards/:id", vrHandler.DeleteBoard)
+			vr.POST("/boards/:id/export", vrHandler.ExportBoard)
+			vr.POST("/boards/:id/share", vrHandler.ShareBoard)
+		}
+
+		// Мобильное приложение
+		mobile := v1.Group("/mobile")
+		{
+			mobile.POST("/sync", mobileHandler.SyncData)
+			mobile.GET("/offline-data", mobileHandler.GetOfflineData)
+			mobile.POST("/voice-notes", mobileHandler.UploadVoiceNote)
+			mobile.GET("/qr-scan", mobileHandler.ProcessQRCode)
+			mobile.POST("/location", mobileHandler.UpdateLocation)
+			mobile.GET("/push-subscription", mobileHandler.GetPushSubscription)
+		}
+	}
+
+	// Swagger документация
+	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// Health check
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "ok",
+			"timestamp": time.Now().Unix(),
+			"service":   "task-service",
+			"version":   "1.0.0",
+		})
+	})
+
+	// WebSocket endpoint для real-time уведомлений
+	router.GET("/ws", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "WebSocket endpoint - not implemented yet",
+			"status":  "coming_soon",
+		})
+	})
+
+	return &App{
+		Config:               cfg,
+		DBConn:               dbConn,
+		DB:                   db,
+		Redis:                redisClient,
+		RabbitMQ:             rabbitMQConn,
+		RabbitMQChan:         rabbitMQChan,
+		Router:               router,
+		TaskService:          taskService,
+		MeetingService:       meetingService,
+		ImportantDateService: importantDateService,
+		IntegrationService:   integrationService,
+		ContactService:       contactService,
+		NotificationService:  notificationService,
+		CacheService:         cacheService,
+		QueueService:         queueService,
+		TaskHandler:          taskHandler,
+		StartTime:            time.Now(),
+		Logger:               logger,
+	}, nil
 }
 
 // setupRoutes настраивает маршруты приложения
@@ -306,12 +503,12 @@ func (app *App) handleWebSocketSubscription(conn *websocket.Conn, data map[strin
 
 // startServer запускает HTTP сервер
 func startServer(app *App, cfg *config.Config) error {
+	// Настройка HTTP сервера
 	server := &http.Server{
-		Addr:         ":" + cfg.Server.Port,
+		Addr:         fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port),
 		Handler:      app.Router,
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
-		IdleTimeout:  cfg.Server.IdleTimeout,
+		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 	}
 
 	// Запуск сервера в горутине

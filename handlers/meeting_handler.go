@@ -7,7 +7,20 @@ import (
 	"github.com/andre/task-service/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+// MeetingHandler обработчик для встреч
+type MeetingHandler struct {
+	logger *zap.Logger
+}
+
+// NewMeetingHandler создает новый экземпляр MeetingHandler
+func NewMeetingHandler(logger *zap.Logger) *MeetingHandler {
+	return &MeetingHandler{
+		logger: logger,
+	}
+}
 
 // CreateMeeting godoc
 // @Summary Create a new meeting
@@ -21,7 +34,7 @@ import (
 // @Failure 403 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/meetings [post]
-func (h *TaskHandler) CreateMeeting(c *gin.Context) {
+func (h *MeetingHandler) CreateMeeting(c *gin.Context) {
 	var meeting models.Meeting
 	if err := c.ShouldBindJSON(&meeting); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input: " + err.Error()})
@@ -71,7 +84,7 @@ func (h *TaskHandler) CreateMeeting(c *gin.Context) {
 // @Failure 400 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/meetings [get]
-func (h *TaskHandler) GetMeetings(c *gin.Context) {
+func (h *MeetingHandler) GetMeetings(c *gin.Context) {
 	userID := c.GetString("user_id")
 	companyID := c.GetString("company_id")
 
@@ -117,7 +130,7 @@ func (h *TaskHandler) GetMeetings(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/meetings/{id} [get]
-func (h *TaskHandler) GetMeeting(c *gin.Context) {
+func (h *MeetingHandler) GetMeeting(c *gin.Context) {
 	meetingID := c.Param("id")
 	userID := c.GetString("user_id")
 
@@ -162,7 +175,7 @@ func (h *TaskHandler) GetMeeting(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/meetings/{id} [put]
-func (h *TaskHandler) UpdateMeeting(c *gin.Context) {
+func (h *MeetingHandler) UpdateMeeting(c *gin.Context) {
 	meetingID := c.Param("id")
 	userID := c.GetString("user_id")
 
@@ -212,7 +225,7 @@ func (h *TaskHandler) UpdateMeeting(c *gin.Context) {
 // @Failure 404 {object} map[string]string "error response"
 // @Failure 500 {object} map[string]string "error response"
 // @Router /tasks/meetings/{id} [delete]
-func (h *TaskHandler) DeleteMeeting(c *gin.Context) {
+func (h *MeetingHandler) DeleteMeeting(c *gin.Context) {
 	meetingID := c.Param("id")
 
 	// Валидация UUID
