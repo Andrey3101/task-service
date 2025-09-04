@@ -373,20 +373,49 @@ func setupDependencies(cfg *config.Config, logger *zap.Logger) (*App, error) {
 	}, nil
 }
 
-// setupRoutes настраивает маршруты приложения
-func (app *App) setupRoutes() {
-	// Middleware
-	app.Router.Use(gin.Recovery())
-	app.Router.Use(middleware.CORS())
-	app.Router.Use(middleware.RateLimit())
+// setupRouter настраивает маршрутизатор с middleware
+func (app *App) setupRouter() {
+	// Настройка CORS для frontend интеграции
+	app.Router.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		c.Header("Access-Control-Expose-Headers", "Content-Length")
+		c.Header("Access-Control-Allow-Credentials", "true")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	})
+
+	// Middleware для логирования
 	app.Router.Use(middleware.Logging(app.Logger))
+
+	// Middleware для CORS
+	app.Router.Use(middleware.CORS())
+
+	// Middleware для безопасности
 	app.Router.Use(middleware.Security())
 
-	// API v1 с аутентификацией
+	// Middleware для rate limiting
+	app.Router.Use(middleware.RateLimit())
+
+	// Middleware для аутентификации (для защищенных маршрутов)
+	app.Router.Use(middleware.Auth())
+
+	// Swagger документация
+	app.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// Health check
+	app.Router.GET("/health", app.healthCheck)
+
+	// API v1
 	v1Group := app.Router.Group("/api/v1")
 	{
-		// Публичные маршруты (без аутентификации)
-		v1Group.GET("/health", app.healthCheck)
+		// Swagger документация для v1
 		v1Group.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 		// Защищенные маршруты (с аутентификацией)
@@ -593,7 +622,7 @@ func main() {
 	}
 
 	// Настройка маршрутов
-	app.setupRoutes()
+	app.setupRouter()
 
 	// Запуск сервера
 	if err := startServer(app, cfg); err != nil {
