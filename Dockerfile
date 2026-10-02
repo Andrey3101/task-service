@@ -1,21 +1,20 @@
-# Этап 1: Сборка Go-приложения
-FROM golang:1.23 AS builder
+# syntax=docker/dockerfile:1
 
-# Установка GOPROXY
-ENV GOPROXY=https://goproxy.io,direct
-
-WORKDIR /app
+FROM golang:1.24-alpine AS build
+WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-RUN go install github.com/swaggo/swag/cmd/swag@latest
 COPY . .
-RUN swag init -g main.go  # Генерация Swagger-документации
-RUN CGO_ENABLED=0 GOOS=linux go build -o task-service ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/task-service .
 
-# Этап 2: Создание минимального контейнера
-FROM alpine:latest
-
-WORKDIR /app
-COPY --from=builder /app/task-service .
-EXPOSE 8082
-CMD ["./task-service"]
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S -g 10001 app \
+    && adduser -S -D -H -u 10001 -G app app
+COPY --from=build /out/task-service /usr/local/bin/task-service
+USER 10001:10001
+ENV PORT=8009
+EXPOSE 8009
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD wget -qO- http://127.0.0.1:8009/health || exit 1
+ENTRYPOINT ["/usr/local/bin/task-service"]

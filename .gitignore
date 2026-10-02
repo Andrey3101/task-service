@@ -1,0 +1,23 @@
+# Binaries
+/task-service
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Env / secrets
+.env
+.env.*
+
+# Go
+vendor/
+go.work
+go.work.sum
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

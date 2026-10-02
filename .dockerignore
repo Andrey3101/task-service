@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+.env
+.env.*
+*.exe
+/task-service
+*.test
+*.out
+vendor/
+.idea/
+.vscode/
