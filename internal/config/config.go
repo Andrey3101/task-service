@@ -7,7 +7,11 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// DefaultRemindersInterval — период фоновых напоминаний (REMINDERS_INTERVAL_SEC).
+const DefaultRemindersInterval = time.Hour
 
 // DefaultTrustedProxies — частные сети (docker/compose), из которых принимаются X-Forwarded-*.
 var DefaultTrustedProxies = []string{
@@ -28,6 +32,8 @@ type Config struct {
 	NotificationServiceURL string
 	LogLevel               slog.Level
 	TrustedProxies         []string
+	// RemindersInterval — период фоновых напоминаний (env REMINDERS_INTERVAL_SEC, по умолчанию 3600).
+	RemindersInterval time.Duration
 }
 
 // Load собирает конфигурацию; getenv обычно os.Getenv.
@@ -46,6 +52,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ServiceToken:           strings.TrimSpace(getenv("SERVICE_TOKEN")),
 		NotificationServiceURL: strings.TrimRight(get("NOTIFICATION_SERVICE_URL", "http://notification-service:8004"), "/"),
 		TrustedProxies:         DefaultTrustedProxies,
+		RemindersInterval:      DefaultRemindersInterval,
 	}
 
 	if len(cfg.JWTSecret) < 32 {
@@ -60,6 +67,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.LogLevel = level
+
+	if raw := strings.TrimSpace(getenv("REMINDERS_INTERVAL_SEC")); raw != "" {
+		sec, err := strconv.Atoi(raw)
+		if err != nil || sec < 1 || sec > 7*24*3600 {
+			return Config{}, fmt.Errorf("некорректный REMINDERS_INTERVAL_SEC: %q (целое число секунд от 1 до 604800)", raw)
+		}
+		cfg.RemindersInterval = time.Duration(sec) * time.Second
+	}
 
 	if raw := strings.TrimSpace(getenv("TRUSTED_PROXIES")); raw != "" {
 		cfg.TrustedProxies = SplitList(raw)

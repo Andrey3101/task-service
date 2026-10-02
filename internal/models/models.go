@@ -68,6 +68,7 @@ type Meeting struct {
 }
 
 // ImportantDate — важная дата (дедлайн, день рождения и т.п.).
+// CreatedBy — автор (получатель напоминаний); у строк, созданных до v2.1 без автора, — uuid.Nil.
 type ImportantDate struct {
 	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
 	CompanyID        uuid.UUID `gorm:"type:uuid;not null;index:idx_important_dates_company_date,priority:1"`
@@ -91,9 +92,20 @@ type TaskReminder struct {
 	SentAt    time.Time `gorm:"not null"`
 }
 
+// ImportantDateReminder фиксирует отправленное напоминание о важной дате (docs/API.md §12.3).
+// Уникальность (important_date_id, occurrence_date): не чаще одного раза на конкретную дату;
+// для birthday/holiday occurrence_date — годовщина, поэтому напоминание уходит ежегодно.
+type ImportantDateReminder struct {
+	ID              uuid.UUID `gorm:"type:uuid;primaryKey"`
+	CompanyID       uuid.UUID `gorm:"type:uuid;not null;index"`
+	ImportantDateID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:uq_important_date_reminders_date_occ,priority:1"`
+	OccurrenceDate  time.Time `gorm:"type:date;not null;uniqueIndex:uq_important_date_reminders_date_occ,priority:2"`
+	SentAt          time.Time `gorm:"not null"`
+}
+
 // All — модели для AutoMigrate.
 func All() []any {
-	return []any{&Task{}, &Comment{}, &TimeEntry{}, &Meeting{}, &ImportantDate{}, &TaskReminder{}}
+	return []any{&Task{}, &Comment{}, &TimeEntry{}, &Meeting{}, &ImportantDate{}, &TaskReminder{}, &ImportantDateReminder{}}
 }
 
 func ensureID(id *uuid.UUID) {
@@ -127,3 +139,5 @@ func (m *Meeting) BeforeCreate(*gorm.DB) error {
 func (d *ImportantDate) BeforeCreate(*gorm.DB) error { ensureID(&d.ID); return nil }
 
 func (r *TaskReminder) BeforeCreate(*gorm.DB) error { ensureID(&r.ID); return nil }
+
+func (r *ImportantDateReminder) BeforeCreate(*gorm.DB) error { ensureID(&r.ID); return nil }

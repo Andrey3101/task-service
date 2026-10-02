@@ -185,8 +185,15 @@ func (h *Handler) deleteDate(c *gin.Context, u auth.User) {
 	if !ok {
 		return
 	}
-	if err := h.db.WithContext(c.Request.Context()).
-		Where("company_id = ? AND id = ?", u.CompanyID, d.ID).Delete(&models.ImportantDate{}).Error; err != nil {
+	// Вместе с датой удаляются отметки об отправленных напоминаниях.
+	err := h.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("company_id = ? AND important_date_id = ?", u.CompanyID, d.ID).
+			Delete(&models.ImportantDateReminder{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("company_id = ? AND id = ?", u.CompanyID, d.ID).Delete(&models.ImportantDate{}).Error
+	})
+	if err != nil {
 		h.internalError(c, err)
 		return
 	}

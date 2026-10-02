@@ -73,6 +73,7 @@ func run() error {
 		TrustedProxies: cfg.TrustedProxies,
 		Log:            log,
 		HealthCheck:    sqlDB.PingContext,
+		ServiceToken:   cfg.ServiceToken,
 	}, api.NewHandler(db, notifier, log))
 	if err != nil {
 		return err
@@ -92,10 +93,11 @@ func run() error {
 	defer cancelWorkers()
 	var workers sync.WaitGroup
 	if notifier.Enabled() {
+		log.Info("фоновые напоминания включены", "interval_sec", int(cfg.RemindersInterval/time.Second))
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			notify.RunReminders(workerCtx, db, notifier, time.Hour, log)
+			notify.RunReminders(workerCtx, db, notifier, cfg.RemindersInterval, log)
 		}()
 	}
 

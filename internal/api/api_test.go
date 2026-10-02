@@ -335,3 +335,103 @@ func TestSummarizeAndDTO(t *testing.T) {
 		}
 	}
 }
+
+func newInternalRouter(t *testing.T, serviceToken string) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r, err := NewRouter(RouterConfig{
+		JWTSecret: testSecret, TrustedProxies: config.DefaultTrustedProxies, Log: discardLog(), ServiceToken: serviceToken,
+	}, NewHandler(nil, &nopSender{}, discardLog()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func callService(r http.Handler, path, svcToken, bearer, body string) (int, map[string]any) {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if svcToken != "" {
+		req.Header.Set(ServiceTokenHeader, svcToken)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	return w.Code, out
+}
+
+func TestPurgeServiceAuth(t *testing.T) {
+	const path = "/api/internal/tasks/purge"
+	body := `{"company_id":"` + uuid.NewString() + `","user_ids":[]}`
+
+	// SERVICE_TOKEN не задан — внутренний API выключен, даже с «пустым» или любым токеном.
+	off := newInternalRouter(t, "")
+	for _, tok := range []string{"", "anything"} {
+		if code, out := callService(off, path, tok, "", body); code != http.StatusServiceUnavailable || out["detail"] == nil {
+			t.Errorf("без конфигурации токена (%q): %d %v", tok, code, out)
+		}
+	}
+
+	r := newInternalRouter(t, "svc-secret-token")
+	// Нет заголовка, неверный токен, префикс/расширение верного — 401. JWT пользователя не помогает.
+	for _, tok := range []string{"", "wrong", "svc-secret-toke", "svc-secret-token1"} {
+		if code, out := callService(r, path, tok, token(t), body); code != http.StatusUnauthorized || out["detail"] == nil {
+			t.Errorf("токен %q: %d %v", tok, code, out)
+		}
+	}
+	// Маршрут вне JWT-группы: без Bearer и с верным сервисным токеном доходим до валидации тела.
+	if code, out := callService(r, path, "svc-secret-token", "", `{}`); code != http.StatusUnprocessableEntity {
+		t.Errorf("верный токен, пустое тело-объект: %d %v", code, out)
+	}
+	// Только POST.
+	if code, _ := call(r, http.MethodGet, path, "", ""); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+		t.Errorf("GET purge: %d", code)
+	}
+}
+
+func TestPurgeValidation(t *testing.T) {
+	const path = "/api/internal/tasks/purge"
+	r := newInternalRouter(t, "svc-secret-token")
+	for _, body := range []string{
+		``,
+		`[]`,
+		`not json`,
+		`{}`,
+		`{"company_id":null}`,
+		`{"company_id":""}`,
+		`{"company_id":"nope"}`,
+		`{"company_id":"00000000-0000-0000-0000-000000000000"}`,
+		`{"company_id":42}`,
+		`{"company_id":"` + uuid.NewString() + `","user_ids":"x"}`,
+		`{"company_id":"` + uuid.NewString() + `","user_ids":["bad"]}`,
+		`{"company_id":"` + uuid.NewString() + `","user_ids":[1]}`,
+	} {
+		if code, out := callService(r, path, "svc-secret-token", "", body); code != http.StatusUnprocessableEntity || out["detail"] == nil {
+			t.Errorf("%q: %d %v", body, code, out)
+		}
+	}
+}
+
+func TestParsePurgeInput(t *testing.T) {
+	cid := uuid.New()
+	s := " " + cid.String() + " "
+	got, field, _ := parsePurgeInput(purgeInput{CompanyID: &s, UserIDs: []string{uuid.NewString()}})
+	if field != "" || got != cid {
+		t.Errorf("valid: %s %s", got, field)
+	}
+	if _, field, _ := parsePurgeInput(purgeInput{CompanyID: &s}); field != "" {
+		t.Errorf("user_ids необязателен: %s", field)
+	}
+}
+
+func TestImportantDateDTOCreatedBy(t *testing.T) {
+	author := uuid.New()
+	raw, _ := json.Marshal(importantDateDTO(&models.ImportantDate{CreatedBy: author, Date: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}))
+	if !strings.Contains(string(raw), `"created_by":"`+author.String()+`"`) {
+		t.Errorf("created_by: %s", raw)
+	}
+}

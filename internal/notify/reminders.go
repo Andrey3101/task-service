@@ -11,32 +11,48 @@ import (
 	"clerkai/task-service/internal/models"
 )
 
-// reminderBatch — максимум задач за один проход.
+// reminderBatch — максимум задач (важных дат — за одну порцию) за один проход.
 const reminderBatch = 500
 
-// RunReminders раз в interval ищет задачи со сроком в ближайшие 24 ч без напоминания
-// и уведомляет исполнителя (или автора). Останавливается при отмене ctx.
+// firstRunDelay — задержка первого прохода после старта сервиса.
+const firstRunDelay = 30 * time.Second
+
+// RunReminders — фоновая задача напоминаний: первый проход через 30 с после старта, далее
+// раз в interval (env REMINDERS_INTERVAL_SEC). За проход: сроки задач в ближайшие 24 ч
+// (исполнителю или автору) и важные даты (автору, docs/API.md §12.3). Останавливается при отмене ctx.
 func RunReminders(ctx context.Context, db *gorm.DB, sender Sender, interval time.Duration, log *slog.Logger) {
-	// Первый проход — вскоре после старта, затем по тикеру.
-	first := time.NewTimer(30 * time.Second)
-	defer first.Stop()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	timer := time.NewTimer(firstRunDelay)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-first.C:
-		case <-ticker.C:
+		case <-timer.C:
 		}
-		n, err := sendDueReminders(ctx, db, sender, time.Now().UTC(), log)
-		if err != nil && ctx.Err() == nil {
-			log.Error("фоновые напоминания: ошибка", "error", err)
-			continue
+		now := time.Now().UTC()
+		runStep(ctx, log, "task_due", func() (int, error) { return sendDueReminders(ctx, db, sender, now, log) })
+		runStep(ctx, log, "important_dates", func() (int, error) { return sendDateReminders(ctx, db, sender, now, log) })
+		// Следующий проход — через interval после окончания текущего (проходы не накладываются).
+		timer.Reset(interval)
+	}
+}
+
+// runStep выполняет один шаг прохода; ошибка или panic шага логируются и не останавливают цикл.
+func runStep(ctx context.Context, log *slog.Logger, step string, fn func() (int, error)) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("фоновые напоминания: panic", "step", step, "panic", fmt.Sprint(rec))
 		}
-		if n > 0 {
-			log.Info("фоновые напоминания отправлены", "count", n)
-		}
+	}()
+	n, err := fn()
+	if err != nil && ctx.Err() == nil {
+		log.Error("фоновые напоминания: ошибка", "step", step, "error", err)
+	}
+	if n > 0 {
+		log.Info("фоновые напоминания отправлены", "step", step, "count", n)
 	}
 }
 

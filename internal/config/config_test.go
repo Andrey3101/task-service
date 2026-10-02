@@ -3,6 +3,7 @@ package config
 import (
 	"log/slog"
 	"testing"
+	"time"
 )
 
 func env(m map[string]string) func(string) string {
@@ -16,7 +17,8 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Port != "8009" || cfg.NotificationServiceURL != "http://notification-service:8004" ||
 		cfg.DatabaseURL != "postgres://user:pass@postgres:5432/tasks_db?sslmode=disable" ||
-		cfg.LogLevel != slog.LevelInfo || len(cfg.TrustedProxies) != len(DefaultTrustedProxies) || cfg.ServiceToken != "" {
+		cfg.LogLevel != slog.LevelInfo || len(cfg.TrustedProxies) != len(DefaultTrustedProxies) || cfg.ServiceToken != "" ||
+		cfg.RemindersInterval != time.Hour {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
 }
@@ -29,12 +31,14 @@ func TestLoadOverrides(t *testing.T) {
 		"TRUSTED_PROXIES":          "10.1.0.0/16, 127.0.0.1",
 		"NOTIFICATION_SERVICE_URL": "http://n:1/",
 		"SERVICE_TOKEN":            " tok ",
+		"REMINDERS_INTERVAL_SEC":   "60",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Port != "9000" || cfg.LogLevel != slog.LevelDebug || len(cfg.TrustedProxies) != 2 ||
-		cfg.NotificationServiceURL != "http://n:1" || cfg.ServiceToken != "tok" {
+		cfg.NotificationServiceURL != "http://n:1" || cfg.ServiceToken != "tok" ||
+		cfg.RemindersInterval != time.Minute {
 		t.Errorf("unexpected cfg: %+v", cfg)
 	}
 }
@@ -45,6 +49,8 @@ func TestLoadErrors(t *testing.T) {
 		"short secret": {"JWT_SECRET": "short"},
 		"bad port":     {"JWT_SECRET": "0123456789abcdef0123456789abcdef", "PORT": "abc"},
 		"bad level":    {"JWT_SECRET": "0123456789abcdef0123456789abcdef", "LOG_LEVEL": "loud"},
+		"bad interval": {"JWT_SECRET": "0123456789abcdef0123456789abcdef", "REMINDERS_INTERVAL_SEC": "0"},
+		"nan interval": {"JWT_SECRET": "0123456789abcdef0123456789abcdef", "REMINDERS_INTERVAL_SEC": "1h"},
 	} {
 		if _, err := Load(env(m)); err == nil {
 			t.Errorf("%s: ожидалась ошибка", name)

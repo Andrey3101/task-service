@@ -23,9 +23,12 @@ type RouterConfig struct {
 	Log            *slog.Logger
 	// HealthCheck проверяет зависимости (пинг БД) для GET /health.
 	HealthCheck func(ctx context.Context) error
+	// ServiceToken — SERVICE_TOKEN для /api/internal/* (пустой — внутренний API отвечает 503).
+	ServiceToken string
 }
 
-// NewRouter собирает gin.Engine: глобальные мидлвари → /health → группа /api с auth → маршруты.
+// NewRouter собирает gin.Engine: глобальные мидлвари → /health → /api/internal (X-Service-Token)
+// → группа /api с JWT → маршруты.
 func NewRouter(cfg RouterConfig, h *Handler) (*gin.Engine, error) {
 	r := gin.New()
 	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
@@ -46,6 +49,11 @@ func NewRouter(cfg RouterConfig, h *Handler) (*gin.Engine, error) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	// Внутренние маршруты — вне JWT-группы, со своей проверкой X-Service-Token (nginx их наружу не пускает).
+	internal := r.Group("/api/internal")
+	internal.Use(serviceAuth(cfg.ServiceToken))
+	internal.POST("/tasks/purge", h.purgeCompany)
 
 	apiGroup := r.Group("/api")
 	apiGroup.Use(auth.Middleware(cfg.JWTSecret)) // до регистрации маршрутов — иначе не применится

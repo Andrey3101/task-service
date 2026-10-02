@@ -118,6 +118,7 @@ func meetingDTO(m *models.Meeting) MeetingDTO {
 }
 
 // ImportantDateDTO — ImportantDate из docs/API.md; date — строка YYYY-MM-DD.
+// created_by — автор (v2.1); у старых записей без автора — нулевой UUID.
 type ImportantDateDTO struct {
 	ID               uuid.UUID `json:"id"`
 	Title            string    `json:"title"`
@@ -125,13 +126,15 @@ type ImportantDateDTO struct {
 	Type             string    `json:"type"`
 	RemindDaysBefore int       `json:"remind_days_before"`
 	Description      string    `json:"description"`
+	CreatedBy        uuid.UUID `json:"created_by"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
 func importantDateDTO(d *models.ImportantDate) ImportantDateDTO {
 	return ImportantDateDTO{
 		ID: d.ID, Title: d.Title, Date: FormatDate(d.Date), Type: d.Type,
-		RemindDaysBefore: d.RemindDaysBefore, Description: d.Description, CreatedAt: ts(d.CreatedAt),
+		RemindDaysBefore: d.RemindDaysBefore, Description: d.Description, CreatedBy: d.CreatedBy,
+		CreatedAt: ts(d.CreatedAt),
 	}
 }
 
